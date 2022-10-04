@@ -1,0 +1,3457 @@
+---
+title: "Workaway - exploring recent travelling trend"
+author: "by Jakub Fiutkowski"
+date: "September 3, 2022"
+output:
+  html_document:
+    css: "simple.css"
+    fig_width: 8
+    fig_height: 5
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, eval = FALSE, tidy = TRUE, warning = FALSE, stop = TRUE, message = FALSE, include = FALSE, fig.align = "center")
+#knitr::opts_chunk$set(echo = TRUE, tidy = FALSE)
+library(tidyverse)
+library(tidymodels)
+library(textrecipes)
+library(tidytext)
+#library(sentimentr)
+library(ggrepel)
+tidymodels_prefer(quiet = TRUE)
+#library(visdat)
+library(scales)
+#library(patchwork) #combining multiple plots in ggplot
+library(lubridate)
+library(stringi)
+#library(tictoc)
+#library(beepr)
+#library(splines)
+library(themis)
+#library(tidyposterior)
+#library(rstanarm)
+library(finetune)
+library(glmnet)
+#library(kernlab)
+#library(survival)
+library(rules)
+#library(bestNormalize)
+#library(corrplot)
+#library(embed)
+#library(ggforce)
+#library(uwot)
+#library(stacks)
+library(xgboost)
+#library(lme4)
+#library(kknn)
+library(baguette)
+library(discrim) #parsnip type - fda (flexible discriminant analysis) + rda (regularized discriminant analysis)
+#library(klaR) #engine for rda - regularized discriminant analysis
+#library(mda) #mars, fda, mda
+conflicted::conflict_prefer("mars", "parnsnip")
+
+#library(usemodels)
+#library(learntidymodels) #https://github.com/tidymodels/learntidymodels
+#library(mixOmics) #https://bioconductor.org/packages/release/bioc/html/mixOmics.html
+theme_set(theme_light())
+
+#stopCluster(cl)
+##registerDoSEQ()
+# library(doParallel)
+# cores <- parallel::detectCores()#logical = FALSE)
+# cl <- makePSOCKcluster(cores[1]-1)
+# registerDoParallel(cl)
+```
+
+<p>Workaway is an online platform connecting people from all over the world - the ones who want to decrease travel expenses with the others who need some help around the house or in their business activities. I've been using the platform heavily in the past months and I'm wondering if I could have improved my experience somehow. 
+Host rating prediction based on profile description would be performed and multiple rating statistics assessed. </p>
+
+<h2>Data Exploration</h2>
+<p>Glossary to make reading easier:</p>
+A) Workaway - name of work&travel portal
+B) Host - person who accepts travellers in their house
+C) workawayer/guest - person who is travelling
+
+<p>All records are related to Host profiles were downloaded from Workaway portal via <i>Selenium</i>. 
+Variables present are the following:</p>
+
+```{r Pull data - everything}
+dirr <- dir(path = ".", pattern = "^workaway_scraping_.+\\.csv$", ignore.case = TRUE)
+
+#only first file
+workaway_pull <- readr::read_delim(dirr[1])#, locale = locale(encoding = "UTF-16LE"))[1,]
+
+for(i in 1:length(dirr)){
+  workaway_initial <- readr::read_delim(dirr[i])#, locale = locale(encoding = "UTF-16LE"))
+  workaway_pull <- full_join(workaway_pull, workaway_initial)
+  }
+problems(workaway_pull)
+
+#saveRDS(workaway_pull, "workaway_pull.rds")
+beepr::beep(4)
+```
+```{r Pull data - Europe only}
+### Read all csv in folder
+dirr <- dir(path = ".", pattern = "\\.csv$", ignore.case = TRUE)
+### Define Europe countries from pre-prepared CSV file
+europe_countries <- readr::read_csv("Europe.csv") %>% #, locale = locale(encoding = "UTF-16LE"))[1,]
+  mutate(country = str_c("workaway_scraping_", country, ".csv")) %>% 
+  select(country)
+### Convert to the same format
+europe_countries <- as.data.frame(europe_countries)
+dirr <- as.data.frame(dirr)
+### Perform semi-join on europe countries
+dirr <- dirr %>% 
+  semi_join(europe_countries, by = c("dirr" = "country"))
+
+workaway_pull_europe <- readr::read_delim(dirr$dirr[1])#, locale = locale(encoding = "UTF-16LE"))[1,]
+
+for(i in 1:length(dirr$dirr)) {
+  workaway_initial <- readr::read_delim(dirr$dirr[i])#, locale = locale(encoding = "UTF-16LE"))
+  workaway_pull_europe <- full_join(workaway_pull_europe, workaway_initial)
+  }
+#saveRDS(workaway_pull_europe, "workaway_pull_europe.rds")
+```
+```{r Data cleaning - BASIC, eval=TRUE}
+workaway_pull <- readRDS("workaway_pull.rds") # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! REMOVE '#'
+workaway <- workaway_pull %>%
+  mutate(host_rating = as.integer(str_extract_all(host_rating, "[:digit:]+")),
+         feedback_no = as.integer(str_extract_all(feedback_no, "[:digit:]+")),
+         reply_rate = as.double(str_extract_all(reply_rate, "[:digit:]+\\.[:digit:]")),
+         average_reply_time = as.integer(str_extract_all(average_reply_time, "[:digit:]+")),
+         favourited = as.integer(str_extract_all(favourited, "[:digit:]+")),
+         number_of_photos = as.integer(number_of_photos),
+         feedback_accuracy = as.double(str_extract_all(feedback_accuracy, "[:digit:]+\\.[:digit:]")),
+         feedback_communication = as.double(str_extract_all(feedback_communication, "[:digit:]+\\.[:digit:]")), 
+         feedback_cultural_exchange = as.double(str_extract_all(feedback_cultural_exchange, "[:digit:]+\\.[:digit:]")), 
+         feedback_total = feedback_accuracy + feedback_communication + feedback_cultural_exchange,
+         feedback_total = round(feedback_total, 1)) %>% 
+  #filter(!is.na(feedback_total)) %>% 
+  # mutate(feedback_total = case_when(feedback_total >= 15 ~ 15,
+  #                                 feedback_total > 14.0 ~ 14,
+  #                                 feedback_total > 13.0 ~ 13,
+  #                                 TRUE ~ "Low")) %>%
+  mutate(internet_access = str_detect(internet_access, "(icon-checked.gif)"),
+         limited_internet = str_detect(limited_internet, "(icon-checked.gif)"),
+         pets = str_detect(pets, "(icon-checked.gif)"),
+         smokers = str_detect(smokers, "(icon-checked.gif)"),
+         hosting_families = str_detect(hosting_families, "(icon-checked.gif)"),
+         ) %>%  
+  mutate(last_activity = dmy(last_activity)) %>% 
+  mutate(what_else = replace_na(what_else, ""),
+         cultural_exchange = replace_na(cultural_exchange, ""),
+         help = replace_na(help, "")) %>% 
+  unite("what_else_cultural_exchange", what_else, cultural_exchange, sep = " ") %>% 
+  unite("full", description, accomodation, help, what_else_cultural_exchange, sep = " ", remove = FALSE)# %>% 
+```
+
+```{r EDA - first glimpse, eval=TRUE, include=TRUE}
+workaway %>% select(-c(full,feedback_total)) %>% glimpse()
+```
+
+We have thousands of records meaning that 27k people are willing to accept a stranger in their house offering food and accommodation in exchange for a few hours of work. The data is a mixture of all, with a majority of <b>character</b> type, so it would certainly require transforamtion and text analysis. Dataset is mostly complete, however several variables are missing in ~50%.
+
+<h3>Geography</h3>
+Let's see first how many countries in total participate?
+
+```{r EDA Count country popularity, eval=TRUE, include=TRUE}
+total_country <- workaway %>% 
+  group_by(country_host) %>% 
+  count(country_host, sort=TRUE)
+
+total_country
+```
+
+Large, English-speaking countries are dominating in the TOP 10.
+
+```{r EDA World Map, eval=TRUE, include=FALSE}
+sPDF <- total_country %>%
+  mutate(country_host = str_replace(country_host, "Slovakia.*", "Slovakia")) %>%
+  rename(c("Popularity of hosting across countries" = "n")) %>% 
+  rworldmap::joinCountryData2Map(
+    #countryExData, 
+                                 joinCode = "NAME", 
+                                 nameJoinColumn = "country_host", 
+                                 verbose = FALSE)
+
+par(mai=c(0,0,0.2,0),xaxs="i",yaxs="i")
+
+classInt <- classInt::classIntervals(sPDF[["Popularity of hosting across countries"]], n = 6, style="jenks")
+catMethod = classInt[["brks"]]
+colourPalette <- RColorBrewer::brewer.pal(6,'YlGnBu')
+
+```
+```{r EDA World Map plotting, eval=TRUE, include=TRUE}
+mapParams <- rworldmap::mapCountryData(sPDF, 
+                            nameColumnToPlot="Popularity of hosting across countries",
+                            addLegend=FALSE, 
+                            catMethod = catMethod,
+                            colourPalette = colourPalette)
+
+do.call(rworldmap::addMapLegend, 
+        c(mapParams, 
+          legendLabels = "all", 
+          legendWidth = 1.0,
+          legendShrink = .95,
+          labelFontSize = 0.8,
+          legendIntervals="data", 
+          legendMar = 5.8))
+```
+
+<p>Africa is the least popular, with low or 0 observations (hosts offering work) among its countries. On the other hand the most blueish part is Europe, indicating it might be the best part of world to start your workawayer adventure - luckily that's what I did!
+Interestingly, we can't see any data in Russia which is the largest country on our globe... After digging it into we can discover that it have been banned from portal search engine due to either security or political reasons.</p>
+
+```{r EDA Europe Map Calculations, eval=TRUE, include=FALSE}
+sPDF <- total_country %>%
+  mutate(country_host = str_replace(country_host, "Slovakia.*", "Slovakia")) %>%
+  rename(c("Popularity of hosting across EURASIA" = "n")) %>%
+  rworldmap::joinCountryData2Map(countryExData,
+                                 joinCode = "NAME",
+                                 nameJoinColumn = "country_host",
+                                 verbose = FALSE)
+```
+```{r EDA Europe Map plotting, eval=TRUE, include=TRUE}
+mapParamsEurope <- rworldmap::mapCountryData(sPDF,
+                            nameColumnToPlot="Popularity of hosting across EURASIA",
+                            addLegend=FALSE,
+                            catMethod = catMethod,
+                            colourPalette = colourPalette,
+                            mapRegion = 'Eurasia')
+
+do.call(rworldmap::addMapLegend,
+        c(mapParamsEurope,
+          legendLabels = "all",
+          legendWidth = 1.0,
+          legendShrink = .95,
+          labelFontSize = 0.8,
+          legendIntervals="data",
+          legendMar = 4.3))
+```
+
+Another glimpse on Eurasia shows that one can choose from 100+ offers only in European countries - furthermore basically all continent is covered giving potential traveler enormous cultural opportunities!
+
+For the rest of EDA we focus solely on Europe as it covers almost 50% of all observations.
+
+<h2>Working hours</h2>
+<p>Let's look at <i>hours expected</i> variable quite important to know beforehand how long a person is supposed to work on an average basis. This was unfortunately designed as a textbox input by portal, thus required some heavy transformations for visualization.</p>
+
+```{r Data cleaning - BASIC Europe, eval=TRUE, cache=TRUE}
+#PULL .RData later for knitting ???
+workaway_pull <- readRDS("workaway_pull_europe.rds")
+workaway <- workaway_pull %>%
+  mutate(host_rating = as.integer(str_extract_all(host_rating, "[:digit:]+")),
+         feedback_no = as.integer(str_extract_all(feedback_no, "[:digit:]+")),
+         reply_rate = as.double(str_extract_all(reply_rate, "[:digit:]+\\.[:digit:]")),
+         average_reply_time = as.integer(str_extract_all(average_reply_time, "[:digit:]+")),
+         favourited = as.integer(str_extract_all(favourited, "[:digit:]+")),
+         number_of_photos = as.integer(number_of_photos),
+         feedback_accuracy = as.double(str_extract_all(feedback_accuracy, "[:digit:]+\\.[:digit:]")),
+         feedback_communication = as.double(str_extract_all(feedback_communication, "[:digit:]+\\.[:digit:]")), 
+         feedback_cultural_exchange = as.double(str_extract_all(feedback_cultural_exchange, "[:digit:]+\\.[:digit:]")), 
+         feedback_total = feedback_accuracy + feedback_communication + feedback_cultural_exchange,
+         feedback_total = round(feedback_total, 1)) %>% 
+  #filter(!is.na(feedback_total)) %>% 
+  # mutate(feedback_total = case_when(feedback_total >= 15 ~ 15,
+  #                                 feedback_total > 14.0 ~ 14,
+  #                                 feedback_total > 13.0 ~ 13,
+  #                                 TRUE ~ "Low")) %>%
+  mutate(internet_access = str_detect(internet_access, "(icon-checked.gif)"),
+         limited_internet = str_detect(limited_internet, "(icon-checked.gif)"),
+         pets = str_detect(pets, "(icon-checked.gif)"),
+         smokers = str_detect(smokers, "(icon-checked.gif)"),
+         hosting_families = str_detect(hosting_families, "(icon-checked.gif)"),
+         ) %>%  
+  mutate(last_activity = dmy(last_activity)) %>% 
+  mutate(what_else = replace_na(what_else, ""),
+         cultural_exchange = replace_na(cultural_exchange, ""),
+         help = replace_na(help, "")) %>% 
+  unite("what_else_cultural_exchange", what_else, cultural_exchange, sep = " ") %>% 
+  unite("full", description, accomodation, help, what_else_cultural_exchange, sep = " ", remove = FALSE)
+```
+```{r Hours expected wrangling to obtain continuous variable Europe, eval=TRUE, cache=TRUE}
+### Function to calculate working hours
+working_hours <- function(single_hours, double_hours, week) {
+output = rep(NA, nrow(HOURS))
+week = replace_na(week, 0)
+    for(i in 1:nrow(HOURS)) {
+      if(is.na(double_hours[i])) {
+        if(week[i] > 2) {
+          output[i] = single_hours[i]*week[i]
+          } else { #week = 1,2: the regex found the weekend pattern, it means how many days you have off in full week
+          output[i] = (7-week[i])*single_hours[i]
+          }
+    } else { #two-digits pattern found in  double_hours_match column, means that host put total hours of work in a week which the most reliable way to count working hours
+      output[i] = double_hours[i]
+    }
+  }
+return(output)
+}
+
+#Expected Hours - cleaning and wrangling
+HOURS <- workaway %>%   
+  mutate(new_hours_expected = str_remove_all(str_to_lower(hours_expected), "maximum|maximum|máximo|maximal|max|minimum|minimun|mínimo")) %>% 
+  select(title, hours_expected, new_hours_expected) %>% 
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "\\s", "_")) %>% 
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "per", "a")) %>% 
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "\\!|\\+|-|,|\\.|[(]|[)]|/|_a_", "_")) %>%  
+  
+  #translate NUMBERS   
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "one", "1")) %>% 
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "two", "2")) %>% 
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "three", "3")) %>% 
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "four", "4")) %>% 
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "five", "5")) %>% 
+  
+  #translate HOURS
+  mutate(new_hours_expected = str_remove_all(new_hours_expected, "with")) %>% 
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "h_jour|hour_|hs|hrs|horas|stunden|heures|hoursrias|hoursa|chours|Std|std", "hours")) %>% 
+
+  #translate WEEKS
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "(_)+", "_")) %>%
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "weekly|week|pro_woche|die_woche|a_week|j_sem|a_la_semana|la_semana|s_la_semana|por_semana|semanales|semaine|en_la_weekana|en_la_semana|s_week|(j/sem.)", "week")) %>%
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "mon_fri|monday_friday|monday_to_friday|mon_to_fri|5d_week|5_in_week|5s_week|5d.as_en_la__weekana|5_s_week|5_la_semana|5_jours_par_week|5week", "5_week")) %>%
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "w..k.i..", "week")) %>%
+
+  #translate DAYS
+  mutate(new_hours_expected = str_remove_all(new_hours_expected, "por_día|por_dia|dia|par_jour|days|day|a_day|al|al_día|día|días|am_tag|tage|tage|daily")) %>%
+
+  #Garbage words removal
+  mutate(new_hours_expected = str_remove_all(new_hours_expected, "_and_|different_off|sometimes|approx|depending|depend|depends|average_of_|between|for|around|arround|ca|at|about|up|und|to|more_less|flexibles|flexible|flexibility|least|environ|aprox|imo|of_|arrange|more_less|_in_|flexibel_working_hours|from|usually|par|_s_|_d_")) %>%
+
+#beginning and end handling in new_hours_expected
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "(_)+", "_")) %>%
+#mutate(new_hours_expected = str_replace_all(new_hours_expected, "__", "_")) %>%
+  mutate(new_hours_expected = str_replace(new_hours_expected, "^_", "")) %>%
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "_$", "")) %>%
+
+  mutate(single_hours_match = parse_number((str_extract(new_hours_expected, "[:digit:](_hours|hours|h_|_h_)"))),
+                  double_hours_match = parse_number(str_extract(new_hours_expected, "([:digit:][:digit:](h|_hours|_hour|hours|_week))|(^[:digit:][:digit:]$)")),
+                  week_match = parse_number(str_extract(new_hours_expected, "([:digit:]_week)|([:digit:]week)|(1_off$)|(2_off$)|([:digit:]_free)|([:digit:] free)|(s_[:digit:]$)|(weekends_are_free)|(x_7$)")))
+
+#Apply function and prepare for joining with main df 'workaway'
+HOURS <- HOURS %>% 
+  mutate(hours_expected_calc = working_hours(HOURS$single_hours_match, HOURS$double_hours_match, HOURS$week_match)) %>% 
+  select(-c(new_hours_expected, single_hours_match, double_hours_match, week_match))
+```
+```{r Data cleaning - joining HOURS + FINAL CLEANING Europe, eval=TRUE}
+workaway_joined <- workaway %>% 
+  left_join(HOURS) %>% 
+  unique() %>% 
+  select(-c(feedback_accuracy, feedback_communication, feedback_cultural_exchange, hours_expected, digital_nomad, campervans, possibly_pets))
+```
+```{r EDA - Charts1 Working hours BOXPLOT, eval=TRUE, include=TRUE, cache=TRUE}
+workaway_joined %>% 
+  filter(hours_expected_calc < 49) %>% 
+  mutate(
+    country_host = fct_lump(country_host, n = 50),
+    country_host = fct_reorder(country_host, hours_expected_calc)
+  ) %>%
+  ggplot(aes(country_host, hours_expected_calc, color = country_host)) +
+  geom_boxplot(outlier.colour = NA) +
+  geom_jitter(alpha = 0.3, width = 0.03) +
+  labs(x = NULL, y = "Expected working hours [h]") +
+  coord_cartesian(ylim = c(15, 35)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        #text=element_text(size=20),
+        # axis.title=element_text(size=18),
+        # axis.text=element_text(size=14),
+        legend.position = "none"
+        )
+```
+
+The distributions are clearly non-normal. Observations are concentrated around multiple of 5-hour intervals, with heaviest concentration in 25 hours vicinity. It means most of the hosts stick to the standard Workaway policy "5 hours a day, 5 days a week". 
+
+<p>We can exclude countries with low observations for better visualization:</p>
+```{r EDA - Charts2 Working hours BARCHART, eval=TRUE, include=TRUE, cache=TRUE}
+#Percentage of working hours - 4 intervals
+workaway_joined %>% 
+  mutate(hours_expected_cutted = case_when(
+    hours_expected_calc >= 49 | is.na(hours_expected_calc) ~ "Unknown", 
+    hours_expected_calc > 25 ~ "More work",
+    hours_expected_calc == 25 ~ "Standard 25h",
+    TRUE ~ "Less work"
+  )) %>% 
+  group_by(country_host) %>%
+  mutate(sum_country = n()) %>%
+  filter(sum_country > 50) %>% 
+  ungroup() %>%
+  count(country_host, hours_expected_cutted, sum_country) %>% 
+  mutate(pct = n/sum_country) %>% 
+  mutate(country_host = fct_reorder(country_host, pct, min,.desc = TRUE)) %>% 
+  ggplot(aes(country_host, pct, fill = factor(hours_expected_cutted, levels = c("Unknown", "More work", "Standard 25h","Less work")))) +
+  geom_col(width = 0.7) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        #text=element_text(size=30), #all text elements
+        # axis.title=element_text(size=18),
+        # axis.text=element_text(size=15),
+        # plot.title=element_text(size=24),
+        # plot.subtitle=element_text(size=20),
+        # legend.text=element_text(size=13),
+        # legend.title=element_text(size=15)
+        ) + 
+  scale_y_continuous(breaks = seq(0, 1, by = 0.1),
+    labels = percent) +
+  labs(x = "",
+       y = "Hours Excpected (% of intervals share)",
+       title = "What is the particular country Exptected Hours share?",
+       subtitle = "Working hours divided into 4 intervals",
+       fill = "Expected Hours intervals")
+```
+
+After dividing working hours into the most popular 4 categories, 25 hours domination is obvious. 
+Some hosts don't indicate precisely what are the working hours, so they write i.e. "8 hours" leaving some space for interpretation. We classify these cases as <b>UNKNOWN</b>, and keep variable in categorical form for prediction purposes.
+
+<h3>Rating by Country</h3>
+<p>How are European countries assesed on average?<p>
+```{r EDA - Charts3 What is the average country rating, eval=TRUE, include=TRUE, cache=TRUE}
+workaway_joined %>% 
+  filter(host_rating >= 0) %>% 
+  group_by(country_host) %>% 
+  count(host_rating, sort = TRUE) %>%
+  mutate(sum_n = sum(n),
+        product_country_rating_host_rating = host_rating*n,
+        sum_country_rating_host_rating = sum(product_country_rating_host_rating),
+        average_country_rating = sum_country_rating_host_rating / sum_n) %>%
+  mutate(average_country_rating2 = mean(host_rating)) %>% 
+  filter(sum_n > 50) %>% 
+  ungroup() %>% 
+  mutate(country_host = fct_reorder(country_host, average_country_rating, .desc = TRUE)) %>% 
+  ggplot(aes(country_host, average_country_rating)) +
+    geom_segment(aes(
+    x = country_host,
+    xend = country_host,
+    y = 76,
+    yend = average_country_rating
+  ),
+  color = "skyblue") +
+  geom_point(color = "midnightblue",
+             size = 3,
+             alpha = 0.7) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)
+        #text=element_text(size=30), #all text elements
+        # axis.title=element_text(size=16),
+        # axis.text=element_text(size=12),
+        # plot.title=element_text(size=20),
+        # legend.text=element_text(size=5),
+        # legend.title=element_text(size=10)
+        ) + 
+  scale_y_continuous(breaks = seq(76, 90, by = 1)) +
+  labs(x = NULL,
+       y = "Average rating points",
+       title = "What is the average Host Rating per Country?",
+       subtitle = "Countries with low observations filtered out")
+```
+
+<p>There is a clear trend so <i>country</i> will also be later used as independent variable, with low-observations countries pulled together.</p>
+
+<h2>Hosts quality metrics</h2>
+<p>The useful tool for choosing your host partner is choosing one of the rating metrics. These are as follows:</p>
+1) User feedback - it allows assessing a host by 3 separate categories (profile accuracy, communication, and cultural exchange) 1 to 5 stars each, and every category is displayed separately and averaged on all feedbacks per host. This is the most informative metric, however it's also a newer one, so it's unavailable on some profiles.
+2) Host rating - it is a formula proposed by the portal, which supposedly takes into account measures like reply rate, average reply time, host activity on site and... "of course user feedbacks".
+
+Let's pull the three detailed user-feedback metrics into 1 <i>feedback total</i>, and compare it with website formula <i>host rating</i>.
+
+```{r Data cleaning - FULL for text, eval=TRUE, cache=TRUE}
+workaway_pull <- readRDS("workaway_pull.rds")
+workaway <- workaway_pull %>%
+  mutate(host_rating = as.integer(str_extract_all(host_rating, "[:digit:]+")),
+         feedback_no = as.integer(str_extract_all(feedback_no, "[:digit:]+")),
+         reply_rate = as.double(str_extract_all(reply_rate, "[:digit:]+\\.[:digit:]")),
+         average_reply_time = as.integer(str_extract_all(average_reply_time, "[:digit:]+")),
+         favourited = as.integer(str_extract_all(favourited, "[:digit:]+")),
+         number_of_photos = as.integer(number_of_photos),
+         feedback_accuracy = as.double(str_extract_all(feedback_accuracy, "[:digit:]+\\.[:digit:]")),
+         feedback_communication = as.double(str_extract_all(feedback_communication, "[:digit:]+\\.[:digit:]")), 
+         feedback_cultural_exchange = as.double(str_extract_all(feedback_cultural_exchange, "[:digit:]+\\.[:digit:]")), 
+         feedback_total = (feedback_accuracy + feedback_communication + feedback_cultural_exchange),
+         feedback_total = round(feedback_total, 1)) %>% 
+  mutate(internet_access = str_detect(internet_access, "(icon-checked.gif)"),
+         limited_internet = str_detect(limited_internet, "(icon-checked.gif)"),
+         pets = str_detect(pets, "(icon-checked.gif)"),
+         smokers = str_detect(smokers, "(icon-checked.gif)"),
+         hosting_families = str_detect(hosting_families, "(icon-checked.gif)"),
+         ) %>%  
+  mutate(last_activity = dmy(last_activity)) %>% 
+  mutate(what_else = replace_na(what_else, ""),
+         cultural_exchange = replace_na(cultural_exchange, ""),
+         help = replace_na(help, "")) %>% 
+  unite("what_else_cultural_exchange", what_else, cultural_exchange, sep = " ") %>% 
+  unite("full", description, accomodation, help, what_else_cultural_exchange, sep = " ", remove = FALSE)# %>% 
+  ### 3rd host rating wrangling
+  # mutate(
+  #   h_no_show = str_detect(h_comm, "No show"),
+  #   ww_no_show = str_detect(ww_comm, "Host cancelled stay at the last minute"),
+  #   h_comm = str_replace_all(h_comm, "Excellent", "5"),
+  #   h_comm = str_replace_all(h_comm, "Very good", "4"),
+  #   h_comm = str_replace_all(h_comm, "Good", "3"),
+  #   h_comm = str_replace_all(h_comm, "Neutral", "2"),
+  #   h_comm = str_replace_all(h_comm, "Negative", "1"),
+  #   h_comm = str_replace_all(h_comm, "No show", "0"),
+  #   h_comm = str_remove_all(h_comm, "[:punct:]"),
+  #   h_count = str_count(h_comm, "[:digit:]"),
+  #   h_sum = str_extract_all(h_comm, "[:digit:]") %>% map_dbl(~as.numeric(.x) %>% sum),
+  #   h_avg = h_sum / h_count,
+  #   ww_comm = str_replace_all(ww_comm, "Excellent", "5"),
+  #   ww_comm = str_replace_all(ww_comm, "Very good", "4"),
+  #   ww_comm = str_replace_all(ww_comm, "Good", "3"),
+  #   ww_comm = str_replace_all(ww_comm, "Neutral", "2"),
+  #   ww_comm = str_replace_all(ww_comm, "Negative", "1"),
+  #   ww_comm = str_replace_all(ww_comm, "Host cancelled stay at the last minute", "0"),
+  #   ww_comm = str_remove_all(ww_comm, "[:punct:]"),
+  #   ww_count = str_count(ww_comm, "[:digit:]"),
+  #   ww_sum = str_extract_all(ww_comm, "[:digit:]") %>% map_dbl(~as.numeric(.x) %>% sum),
+  #   ww_avg = ww_sum / ww_count
+  #   ) %>%
+  # select(-c(h_comm, h_sum, ww_comm, ww_sum))
+```
+```{r Hours expected wrangling to obtain continuous variable FULL for text, eval=TRUE, cache=TRUE}
+### Function to calculate working hours
+working_hours <- function(single_hours, double_hours, week) {
+output = rep(NA, nrow(HOURS))
+week = replace_na(week, 0)
+    for(i in 1:nrow(HOURS)) {
+      if(is.na(double_hours[i])) {
+        if(week[i] > 2) {
+          output[i] = single_hours[i]*week[i]
+          } else { #week = 1,2: the regex found the weekend pattern, it means how many days you have off in full week
+          output[i] = (7-week[i])*single_hours[i]
+          }
+    } else { #two-digits pattern found in  double_hours_match column, means that host put total hours of work in a week which the most reliable way to count working hours
+      output[i] = double_hours[i]
+    }
+  }
+return(output)
+}
+
+#Expected Hours - cleaning and wrangling
+HOURS <- workaway %>%   
+  mutate(new_hours_expected = str_remove_all(str_to_lower(hours_expected), "maximum|maximum|máximo|maximal|max|minimum|minimun|mínimo")) %>% 
+  select(title, hours_expected, new_hours_expected) %>% 
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "\\s", "_")) %>% 
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "per", "a")) %>% 
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "\\!|\\+|-|,|\\.|[(]|[)]|/|_a_", "_")) %>%  
+  
+  #translate NUMBERS   
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "one", "1")) %>% 
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "two", "2")) %>% 
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "three", "3")) %>% 
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "four", "4")) %>% 
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "five", "5")) %>% 
+  
+  #translate HOURS
+  mutate(new_hours_expected = str_remove_all(new_hours_expected, "with")) %>% 
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "h_jour|hour_|hs|hrs|horas|stunden|heures|hoursrias|hoursa|chours|Std|std", "hours")) %>% 
+
+  #translate WEEKS
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "(_)+", "_")) %>%
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "weekly|week|pro_woche|die_woche|a_week|j_sem|a_la_semana|la_semana|s_la_semana|por_semana|semanales|semaine|en_la_weekana|en_la_semana|s_week|(j/sem.)", "week")) %>%
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "mon_fri|monday_friday|monday_to_friday|mon_to_fri|5d_week|5_in_week|5s_week|5d.as_en_la__weekana|5_s_week|5_la_semana|5_jours_par_week|5week", "5_week")) %>%
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "w..k.i..", "week")) %>%
+
+  #translate DAYS
+  mutate(new_hours_expected = str_remove_all(new_hours_expected, "por_día|por_dia|dia|par_jour|days|day|a_day|al|al_día|día|días|am_tag|tage|tage|daily")) %>%
+
+  #Garbage words removal
+  mutate(new_hours_expected = str_remove_all(new_hours_expected, "_and_|different_off|sometimes|approx|depending|depend|depends|average_of_|between|for|around|arround|ca|at|about|up|und|to|more_less|flexibles|flexible|flexibility|least|environ|aprox|imo|of_|arrange|more_less|_in_|flexibel_working_hours|from|usually|par|_s_|_d_")) %>%
+
+#beginning and end handling in new_hours_expected
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "(_)+", "_")) %>%
+#mutate(new_hours_expected = str_replace_all(new_hours_expected, "__", "_")) %>%
+  mutate(new_hours_expected = str_replace(new_hours_expected, "^_", "")) %>%
+  mutate(new_hours_expected = str_replace_all(new_hours_expected, "_$", "")) %>%
+
+  mutate(single_hours_match = parse_number((str_extract(new_hours_expected, "[:digit:](_hours|hours|h_|_h_)"))),
+                  double_hours_match = parse_number(str_extract(new_hours_expected, "([:digit:][:digit:](h|_hours|_hour|hours|_week))|(^[:digit:][:digit:]$)")),
+                  week_match = parse_number(str_extract(new_hours_expected, "([:digit:]_week)|([:digit:]week)|(1_off$)|(2_off$)|([:digit:]_free)|([:digit:] free)|(s_[:digit:]$)|(weekends_are_free)|(x_7$)")))
+
+#Apply function and prepare for joining with main df 'workaway'
+HOURS <- HOURS %>% 
+  mutate(hours_expected_calc = working_hours(HOURS$single_hours_match, HOURS$double_hours_match, HOURS$week_match)) %>% 
+  select(-c(new_hours_expected, single_hours_match, double_hours_match, week_match))
+```
+```{r Data cleaning - joining HOURS FULL for text, eval=TRUE, cache=TRUE}
+workaway_joined <- workaway %>% 
+  left_join(HOURS) %>% 
+  unique() %>% 
+  select(-c(feedback_accuracy, feedback_communication, feedback_cultural_exchange, hours_expected, digital_nomad, campervans, possibly_pets))
+  #filter(!is.na(host_rating))
+```
+```{r EDA chart of feedback vs host rating, eval=TRUE, include=TRUE, cache=TRUE}
+workaway_joined %>% 
+  ggplot(aes(host_rating, feedback_total)) +
+  geom_point() +
+  labs(title = "Comparison of 2 ranking metrics",
+       x = "Host rating [%] - portal metric",
+       y = "Feedback total - user metric"
+       ) +
+  coord_cartesian(ylim = c(7.2, 15),
+                  xlim = c(55, 100)) +
+  scale_y_continuous(breaks = seq(6, 15, by = 1)) +
+  scale_x_continuous(breaks = seq(50, 100, by = 5))
+```
+
+<p>That's really interesting!</p>
+A) Host rating metric is more like categorical than continuous measure, which is strange as it supposedly is based on numeric-type inputs
+B) We have total mixture of different observations:
+- 100% <i>host rating</i> can have minimal <i>feedback total</i> rating
+- full scale <i>feedback total</i> (15.0), is present across all <i>host rating</i> levels
+
+<h3>Find words related to feedback total</h3>
+
+We divide <i>feedback total</i> into 4 intervals.
+```{r EDA - Count feedback_total by intervals, fig.height=3, eval=TRUE, include=TRUE, cache=TRUE}
+workaway_joined %>% 
+  filter(!is.na(feedback_total)) %>% 
+  mutate(feedback_total = case_when(feedback_total >= 15.0 ~ 15,
+                                  feedback_total >= 14.0 ~ 14,
+                                  feedback_total >= 13.0 ~ 13,
+                                  TRUE ~ 12)) %>%
+  count(feedback_total) %>% 
+  mutate(x = "1",
+         feedback_total = as.factor(feedback_total),
+         cum_sum = cumsum(n),
+         sum_n = sum(n),
+         pct = n / sum_n,
+         cumulative_per = n/cum_sum,
+         x = fct_reorder(x, pct, min,.desc = TRUE) 
+         ) %>%
+  #glimpse()
+  ggplot(aes(x, pct, fill = feedback_total)) +
+  geom_col(width = 0.5) + 
+  coord_flip() +
+  theme(axis.text.y = element_text(size=0))+
+  #scale_y_continuous(labels = scales::percent) +
+  scale_y_continuous(breaks = seq(0, 1, by = 0.1), labels = scales::percent) +
+  labs(x = NULL, y = NULL,
+       title = "Proportion of particular feedback level occurence in the dataset",
+       fill = "Feedback level")
+
+# theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+#         #text=element_text(size=30), #all text elements
+#         # axis.title=element_text(size=18),
+#         # axis.text=element_text(size=15),
+#         # plot.title=element_text(size=24),
+#         # plot.subtitle=element_text(size=20),
+#         # legend.text=element_text(size=13),
+#         # legend.title=element_text(size=15)
+#         ) + 
+#   scale_y_continuous(breaks = seq(0, 1, by = 0.1),
+#     labels = percent) +
+#   labs(x = "",
+#        y = "Hours Excpected (% of intervals share)",
+#        title = "What is the particular country Exptected Hours share?",
+#        subtitle = "Working hours divided into 4 intervals",
+#        fill = "Expected Hours intervals")
+```
+
+Reality of <i>feedback total</i> scale <0; 15> is that among non-missing data, 90% values fall between <14;15> range.
+```{r EDA - histograms of numerics + counts of factors}
+# factor_vars <- full_data %>%
+#   mutate_if(is.character, as.factor) %>% 
+#   select(where(is.factor)) %>%
+#   names()
+# 
+# map(factor_vars, ~{
+# full_data %>%
+# count(.data[[.x]]) %>% 
+#     arrange(desc(n))
+# })
+
+num_vars <- train %>%
+  select(where(is.numeric)) %>% 
+  names()
+
+map(num_vars, ~{
+workaway_joined %>%
+    filter(!is.na(feedback_total)) %>% 
+    mutate(feedback_interval = case_when(
+    feedback_total > 12 ~ "High",
+    TRUE ~ "Low"
+  )) %>% 
+    ggplot(aes(x = .data[[.x]], y = feedback_total, color=feedback_interval)) +
+    geom_point()
+})
+```
+
+```{r EDA - text analysis - only "Description" variable}
+workaway_tokens_description <- workaway %>% #_joined %>% 
+  mutate(across(.cols = description, ~str_replace_na(.x))) %>% 
+  select(title, country_host, feedback_no, feedback_total, host_rating, description) %>% 
+  #get_sentences(workaway$description) %>%
+  unnest_tokens(output = word, input = description, token = "words")
+
+#Removing stop words 
+tidy_English_stop_words <- tidystopwords::generate_stoplist("English") #Comparison of basic stop_words with tidystopwords English database
+tidy_Polish_stop_words <- tidystopwords::generate_stoplist("Polish")
+tidy_French_stop_words <- tidystopwords::generate_stoplist("French")
+tidy_German_stop_words <- tidystopwords::generate_stoplist("German")
+tidy_Spanish_stop_words <- tidystopwords::generate_stoplist("Spanish")
+
+workaway_no_filtered_description <- workaway_tokens_description %>% 
+  anti_join(stop_words) %>% #biggest ENGLISH stop_words list
+  #anti_join(as.data.frame(tidy_English_stop_words), by = c("word" = "tidy_English_stop_words"))  %>% 
+  anti_join(as.data.frame(tidy_Polish_stop_words), by = c("word" = "tidy_Polish_stop_words"))  %>% 
+  anti_join(as.data.frame(tidy_French_stop_words), by = c("word" = "tidy_French_stop_words"))  %>% 
+  anti_join(as.data.frame(tidy_German_stop_words), by = c("word" = "tidy_German_stop_words"))  %>% 
+  anti_join(as.data.frame(tidy_Spanish_stop_words), by = c("word" = "tidy_Spanish_stop_words"))  %>% 
+  filter(!str_detect(word, pattern = "[[:digit:]]")) #only ~4987 words removed with tidystopwords dictionary, much more with standard "stop_words" dict
+
+# workaway_tokens_tfidf_description <- workaway_no_filtered_description %>% 
+#   count(title, word, sort = TRUE) %>% 
+#   bind_tf_idf(word, title, n)
+# 
+# View(workaway_tokens_tfidf_description %>% 
+#   group_by(title) %>% 
+#   slice_max(n, n = 2) %>%
+#   arrange(desc(tf_idf)) %>% 
+#   ungroup() %>% 
+#   distinct(word, .keep_all = TRUE))
+```
+```{r EDA - text analysis - only "Accomodation" variable, eval=TRUE}
+workaway_tokens_accomodation <- workaway %>% #_joined %>% 
+  mutate(across(.cols = accomodation, ~str_replace_na(.x))) %>% 
+  select(title, country_host, feedback_no, feedback_total, host_rating, accomodation) %>% 
+  #get_sentences(workaway$accomodation) %>% #WARNING 
+  unnest_tokens(output = word, input = accomodation, token = "words")
+
+#Removing stop words 
+tidy_English_stop_words <- tidystopwords::generate_stoplist("English") #Comparison of basic stop_words with tidystopwords English database
+tidy_Polish_stop_words <- tidystopwords::generate_stoplist("Polish")
+tidy_French_stop_words <- tidystopwords::generate_stoplist("French")
+tidy_German_stop_words <- tidystopwords::generate_stoplist("German")
+tidy_Spanish_stop_words <- tidystopwords::generate_stoplist("Spanish")
+
+workaway_no_filtered_accomodation <- workaway_tokens_accomodation %>% 
+  anti_join(stop_words) %>% #biggest ENGLISH stop_words list
+  #anti_join(as.data.frame(tidy_English_stop_words), by = c("word" = "tidy_English_stop_words"))  %>% 
+  anti_join(as.data.frame(tidy_Polish_stop_words), by = c("word" = "tidy_Polish_stop_words"))  %>% 
+  anti_join(as.data.frame(tidy_French_stop_words), by = c("word" = "tidy_French_stop_words"))  %>% 
+  anti_join(as.data.frame(tidy_German_stop_words), by = c("word" = "tidy_German_stop_words"))  %>% 
+  anti_join(as.data.frame(tidy_Spanish_stop_words), by = c("word" = "tidy_Spanish_stop_words"))  %>% 
+  filter(!str_detect(word, pattern = "[[:digit:]]")) #only ~4987 words removed with tidystopwords dictionary, much more with standard "stop_words" dict
+
+# workaway_tokens_tfidf_accomodation <- workaway_no_filtered_accomodation %>% 
+#   count(title, word, sort = TRUE) %>% 
+#   bind_tf_idf(word, title, n)
+# 
+# View(workaway_tokens_tfidf_accomodation %>% 
+#   group_by(title) %>% 
+#   slice_max(n, n = 2) %>%
+#   arrange(desc(tf_idf)) %>% 
+#   ungroup() %>% 
+#   distinct(word, .keep_all = TRUE))
+```
+```{r EDA - text analysis - only "Help" variable}
+workaway_tokens_help <- workaway %>% #_joined %>% 
+  mutate(across(.cols = help, ~str_replace_na(.x))) %>% 
+  select(title, country_host, feedback_no, feedback_total, host_rating, help) %>% 
+  #get_sentences(workaway$help) %>%
+  unnest_tokens(output = word, input = help, token = "words")
+
+#Removing stop words 
+tidy_English_stop_words <- tidystopwords::generate_stoplist("English") #Comparison of basic stop_words with tidystopwords English database
+tidy_Polish_stop_words <- tidystopwords::generate_stoplist("Polish")
+tidy_French_stop_words <- tidystopwords::generate_stoplist("French")
+tidy_German_stop_words <- tidystopwords::generate_stoplist("German")
+tidy_Spanish_stop_words <- tidystopwords::generate_stoplist("Spanish")
+
+workaway_no_filtered_help <- workaway_tokens_help %>% 
+  anti_join(stop_words) %>% #biggest ENGLISH stop_words list
+  #anti_join(as.data.frame(tidy_English_stop_words), by = c("word" = "tidy_English_stop_words"))  %>% 
+  anti_join(as.data.frame(tidy_Polish_stop_words), by = c("word" = "tidy_Polish_stop_words"))  %>% 
+  anti_join(as.data.frame(tidy_French_stop_words), by = c("word" = "tidy_French_stop_words"))  %>% 
+  anti_join(as.data.frame(tidy_German_stop_words), by = c("word" = "tidy_German_stop_words"))  %>% 
+  anti_join(as.data.frame(tidy_Spanish_stop_words), by = c("word" = "tidy_Spanish_stop_words"))  %>% 
+  filter(!str_detect(word, pattern = "[[:digit:]]")) #only ~4987 words removed with tidystopwords dictionary, much more with standard "stop_words" dict
+
+# workaway_tokens_tfidf_help <- workaway_no_filtered_help %>% 
+#   count(title, word, sort = TRUE) %>% 
+#   bind_tf_idf(word, title, n)
+# 
+# View(workaway_tokens_tfidf_help %>% 
+#   group_by(title) %>% 
+#   slice_max(n, n = 2) %>%
+#   arrange(desc(tf_idf)) %>% 
+#   ungroup() %>% 
+#   distinct(word, .keep_all = TRUE))
+```
+```{r EDA - text analysis - only "What else + cultural exchange" variable}
+workaway_tokens_other <- workaway %>% #_joined %>% 
+  mutate(across(.cols = what_else_cultural_exchange, ~str_replace_na(.x))) %>% 
+  select(title, country_host, feedback_no, feedback_total, host_rating, what_else_cultural_exchange) %>% 
+  #get_sentences(workaway$what_else_cultural_exchange) %>%
+  unnest_tokens(output = word, input = what_else_cultural_exchange, token = "words")
+
+#Removing stop words 
+tidy_English_stop_words <- tidystopwords::generate_stoplist("English") #Comparison of basic stop_words with tidystopwords English database
+tidy_Polish_stop_words <- tidystopwords::generate_stoplist("Polish")
+tidy_French_stop_words <- tidystopwords::generate_stoplist("French")
+tidy_German_stop_words <- tidystopwords::generate_stoplist("German")
+tidy_Spanish_stop_words <- tidystopwords::generate_stoplist("Spanish")
+
+workaway_no_filtered_other <- workaway_tokens_other %>% 
+  anti_join(stop_words) %>% #biggest ENGLISH stop_words list
+  #anti_join(as.data.frame(tidy_English_stop_words), by = c("word" = "tidy_English_stop_words"))  %>% 
+  anti_join(as.data.frame(tidy_Polish_stop_words), by = c("word" = "tidy_Polish_stop_words"))  %>% 
+  anti_join(as.data.frame(tidy_French_stop_words), by = c("word" = "tidy_French_stop_words"))  %>% 
+  anti_join(as.data.frame(tidy_German_stop_words), by = c("word" = "tidy_German_stop_words"))  %>% 
+  anti_join(as.data.frame(tidy_Spanish_stop_words), by = c("word" = "tidy_Spanish_stop_words"))  %>% 
+  filter(!str_detect(word, pattern = "[[:digit:]]")) #only ~4987 words removed with tidystopwords dictionary, much more with standard "stop_words" dict
+
+# workaway_tokens_tfidf_other <- workaway_no_filtered_other %>% 
+#   count(title, word, sort = TRUE) %>% 
+#   bind_tf_idf(word, title, n)
+# 
+# View(workaway_tokens_tfidf_other %>% 
+#   group_by(title) %>% 
+#   slice_max(n, n = 2) %>%
+#   arrange(desc(tf_idf)) %>% 
+#   ungroup() %>% 
+#   distinct(word, .keep_all = TRUE))
+```
+
+We will take the top 200 words from tokenized <i>accommodation</i>, filter out <i>stop words</i> in all popular languages (English, French, Spanish, German, Polish), as well as plurals (English only as is the most popular). 
+Then create all pairs of word vs feedback level. 
+```{r GLM model1 - description-feedback}
+top_200_description <- 
+  workaway_no_filtered_description %>%
+  filter(!str_detect(word, "([A-Z;a-z]+s$)")) %>% #additional line - removing the plurals
+  count(word, sort = T) %>% 
+  slice_max(n, n = 200) %>% #decide how many TOP words to take into consideration
+  pull(word)
+
+word_frequency <- workaway_no_filtered_description %>% 
+  filter(!is.na(feedback_total)) %>% #we take top200 words from all the data in "workaway" variable, however we make models only for these variables where there are no "NA" values for independent variable
+  mutate(feedback_total = case_when(feedback_total >= 15.0 ~ 15,
+                                  feedback_total >= 14.0 ~ 14,
+                                  feedback_total >= 13.0 ~ 13,
+                                  TRUE ~ 12)) %>%
+  count(word, feedback_total) %>%
+  complete(word, feedback_total, fill = list(n = 0)) %>%
+  group_by(feedback_total) %>%
+  mutate(
+    total = sum(n),
+    proportion = n / total
+  ) %>%
+  ungroup() %>%
+  filter(word %in% top_200_description)
+
+word_frequency
+
+word_modeling <-
+  word_frequency %>%
+  nest(data = c(feedback_total, n, total, proportion)) %>%
+  mutate(
+    model = map(data, ~ glm(cbind(n, total) ~ feedback_total, ., family = "binomial")),
+    model = map(model, tidy)
+  ) %>%
+  unnest(model) %>%
+  filter(term == "feedback_total") %>%
+  mutate(p.value = p.adjust(p.value)) %>%
+  arrange(-estimate)
+
+word_modeling
+
+word_modeling %>%
+  ggplot(aes(estimate, p.value)) +
+  geom_vline(xintercept = 0, lty = 2, alpha = 0.7, color = "gray50") +
+  geom_point(color = "lightblue", alpha = 0.8, size = 2.5, shape = 16) +
+  scale_y_log10() +
+  geom_text_repel(aes(label = word), 
+                  
+                  seed = 2222,
+                  max.time = 1,
+                  max.iter = 40000,
+                  max.overlaps = 20,
+                  #arrow = arrow(length = unit(0.01, "npc")),
+                  box.padding = 0.1)
+
+higher_words_description <-
+  word_modeling %>%
+  filter(p.value < 0.05) %>%
+  filter(estimate > 0) %>% 
+  slice_max(estimate, n = 10) %>%
+  pull(word)
+lower_words_description <-
+  word_modeling %>%
+  filter(p.value < 0.05) %>%
+  filter(estimate < 0) %>% 
+  slice_max(-estimate, n = 10) %>%
+  pull(word)
+# higher_words_description <- higher_words_description_temp %>% anti_join(lower_words_description_temp) %>% pull(word)
+# lower_words_description <- lower_words_description_temp %>% anti_join(higher_words_description_temp) %>% pull(word)
+
+word_frequency %>%
+  filter(word %in% lower_words_description) %>%
+  ggplot(aes(feedback_total, proportion, color = word)) +
+  geom_line(size = 1.5, alpha = 0.7, show.legend = FALSE) +
+  facet_wrap(vars(word), scales = "free_y") +
+  #scale_x_continuous(labels = scales::dollar) +
+  #scale_y_continuous(labels = scales::percent, limits = c(0, NA)) +
+  labs(x = NULL, y = "proportion of total words used against Total Feedback",
+       title = "TOP LOWER WORDS description") +
+  theme(strip.text = element_text(size = 15))
+
+word_frequency %>%
+  filter(word %in% higher_words_description) %>%
+  ggplot(aes(feedback_total, proportion, color = word)) +
+  geom_line(size = 1.5, alpha = 0.7, show.legend = FALSE) +
+  facet_wrap(vars(word), scales = "free_y") +
+  #scale_x_continuous(labels = scales::dollar) +
+  #scale_y_continuous(labels = scales::percent, limits = c(0, NA)) +
+  labs(x = NULL, y = "proportion of total words used against Total Feedback",
+       title = "TOP HIGHER WORDS description") +
+  theme(strip.text = element_text(size = 15))
+
+higher_description_model <- glue::glue_collapse(higher_words_description, sep = "|")
+# higher_description_model <- str_replace_all(higher_description_model, "\\|{2,10}", "\\|")
+# higher_description_model <- str_remove(higher_description_model, "^\\||\\|$")
+# higher_description_model <- higher_words_description
+
+lower_description_model <- glue::glue_collapse(lower_words_description, sep = "|")
+# lower_description_model <- str_replace_all(lower_description_model, "\\|{2,10}", "\\|")
+# lower_description_model <- str_remove(lower_description_model, "^\\||\\|$")
+# lower_description_model <- lower_words_description
+```
+```{r GLM model2 accomodationfeedback, eval=TRUE, include=TRUE, cache=TRUE}
+top_200_accomodation <- 
+  workaway_no_filtered_accomodation %>%
+  filter(!str_detect(word, "([A-Z;a-z]+s$)")) %>% #additional line - removing the plurals
+  count(word, sort = T) %>% 
+  slice_max(n, n = 200) %>% #decide how many TOP words to take into consideration
+  pull(word)
+
+word_frequency <- workaway_no_filtered_accomodation %>% 
+  filter(!is.na(feedback_total)) %>% #we take top200 words from all the data in "workaway" variable, however we make models only for these variables where there are no "NA" values for independent variable
+  mutate(feedback_total = case_when(feedback_total >= 15.0 ~ 15,
+                                  feedback_total >= 14.0 ~ 14,
+                                  feedback_total >= 13.0 ~ 13,
+                                  TRUE ~ 12)) %>%
+  count(word, feedback_total) %>%
+  complete(word, feedback_total, fill = list(n = 0)) %>%
+  group_by(feedback_total) %>%
+  mutate(
+    total = sum(n),
+    proportion = n / total
+  ) %>%
+  ungroup() %>%
+  filter(word %in% top_200_accomodation)
+
+word_frequency
+
+word_modeling <-
+  word_frequency %>%
+  nest(data = c(feedback_total, n, total, proportion)) %>%
+  mutate(
+    model = map(data, ~ glm(cbind(n, total) ~ feedback_total, ., family = "binomial")),
+    model = map(model, tidy)
+  ) %>%
+  unnest(model) %>%
+  filter(term == "feedback_total") %>%
+  mutate(p.value = p.adjust(p.value)) %>%
+  arrange(-estimate)
+
+#word_modeling
+
+# word_modeling %>%
+#   ggplot(aes(estimate, p.value)) +
+#   geom_vline(xintercept = 0, lty = 2, alpha = 0.7) +
+#   geom_point(color = "lightblue", alpha = 0.8, size = 2.1, shape = 14) +
+#   scale_y_log10() +
+#   geom_text_repel(aes(label = word),
+#                   seed = 2222,
+#                   max.time = 2,
+#                   max.iter = 40000,
+#                   max.overlaps = 20,
+#                   #arrow = arrow(length = unit(0.01, "npc")),
+#                   box.padding = 0.1)
+
+higher_words_accomodation <-
+  word_modeling %>%
+  filter(p.value < 0.05) %>%
+  filter(estimate > 0) %>% 
+  slice_max(estimate, n = 10) %>% #15 for modelling
+  pull(word)
+lower_words_accomodation <-
+  word_modeling %>%
+  filter(estimate < 0) %>% 
+  filter(p.value < 0.05) %>%
+  slice_max(-estimate, n = 10) %>% #15 for modelling
+  pull(word)
+
+accom_low <- word_frequency %>%
+  filter(word %in% lower_words_accomodation) %>%
+  filter(word != "located") %>%
+  ggplot(aes(feedback_total, proportion, color = word)) +
+  geom_line(size = 1.2, alpha = 0.8, show.legend = FALSE) +
+  facet_wrap(vars(word), scales = "free_y") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = NULL, y = NULL,
+       title = "Low Estimate  - proportion of total words used vs Total Feedback") +
+  theme(strip.text = element_text(size = 11))
+# accom_low
+
+accom_high <- word_frequency %>%
+  filter(word %in% higher_words_accomodation) %>%
+  filter(word != "floor") %>%
+  ggplot(aes(feedback_total, proportion, color = word)) +
+  geom_line(size = 1.2, alpha = 0.8, show.legend = FALSE) +
+  facet_wrap(~word, scales = "free_y") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = NULL, y = NULL,
+       title = "High Estimate  - proportion of total words used vs Total Feedback") +
+  theme(strip.text = element_text(size = 11))
+# accom_high
+
+higher_accomodation_model <- glue::glue_collapse(higher_words_accomodation, sep = "|")
+# higher_accomodation_model <- str_replace_all(higher_accomodation_model, "\\|{2,10}", "\\|")
+# higher_accomodation_model <- str_remove(higher_accomodation_model, "^\\||\\|$")
+#higher_accomodation_model <- higher_words_accomodation
+
+lower_accomodation_model <- glue::glue_collapse(lower_words_accomodation, sep = "|")
+# lower_accomodation_model <- str_replace_all(lower_accomodation_model, "\\|{2,10}", "\\|")
+# lower_accomodation_model <- str_remove(lower_accomodation_model, "^\\||\\|$")
+#lower_accomodation_model <- lower_words_accomodation
+```
+<p></p>
+<p>We proceed with predicting occurrence of words in particular level <b>as word count out of total counts in level</b> via GLM model.</p>
+```{r EDA Volcano plot, eval=TRUE, include=TRUE, cache=TRUE}
+#Defining GLM model and tidying results
+word_modeling <-
+  word_frequency %>%
+  nest(data = c(feedback_total, n, total, proportion)) %>%
+  mutate(
+    model = map(data, ~ glm(cbind(n, total) ~ feedback_total, ., family = "binomial")),
+    model = map(model, tidy)
+  ) %>%
+  unnest(model) %>%
+  filter(term == "feedback_total") %>%
+  mutate(p.value = p.adjust(p.value)) %>% #Adjusting  p.value
+  arrange(-estimate)
+
+word_modeling
+
+#Plotting the results of most important words
+word_modeling %>%
+  ggplot(aes(estimate, p.value)) +
+  geom_vline(xintercept = 0, lty = 2, alpha = 0.7) +
+  geom_point(color = "lightblue", alpha = 0.8, size = 2.1, shape = 10) +
+  scale_y_log10() +
+  labs(y = "Adjusted p-value") +
+  geom_text_repel(aes(label = word), 
+                  seed = 2222,
+                  max.time = 2,
+                  max.iter = 40000,
+                  max.overlaps = 20,
+                  #arrow = arrow(length = unit(0.01, "npc")),
+                  box.padding = 0.1)
+```
+
+<p>Volcano plot shows how each word's effect size relates to p-value. </p>
+1) High positive estimates are: <b>happy, eat, love, size, queen, spare, private.</b>
+2) Low estimate of significant words are: <b>basic, bunk, electricity, hostel, rice, staff, volunteer.</b>
+
+<p>Filtering TOP low and high estimates below 0.05 p-value level, we visualize it against pre-defined <i>feedback total</i> levels:</p>
+```{r Load accom, eval=TRUE, include=TRUE, cache=TRUE}
+accom_low
+accom_high
+```
+
+<p>Some of the interesting cases:</p>
+a) <b>electricity</b> trending downwards - that's because if there is electricity everywhere in the place hosts don't mention it. On the other hand, if potential workawayer is going to sleep in a tent or campervan, where electricity is limited, host wants to point it out
+b) <b>rice, basic</b> in low estimates - food is not always included. Sometimes host can cook for you, and the other times you are provided with ingredients to cook for yourself - it can be i.e. "<b>rice</b>, or <b>basic</b> ingredients". <b>Basic</b> can also relate to comfort of accommodation in general 
+c) <b>eat, love</b> in TOP WORDS - these words may occur in description where host writes about cooking delicious food for guest who will <b>eat</b> it and <b>love</b> it. <b>Love</b> can relate also to comfort of accommodation place and is less likely to be used if guest sleeps in a cold tent or large dormitory with 15 other people
+
+<p>These tokens would be used for prediction of rating metrics. Similar process is performed for the following independent variables:</p>
+- description
+- help
+- what else and cultural exchange (joined together)
+
+```{r GLM model3 - help-feedback}
+top_200_help <- 
+  workaway_no_filtered_help %>%
+  filter(!str_detect(word, "([A-Z;a-z]+s$)")) %>% #additional line - removing the plurals
+  count(word, sort = T) %>% 
+  slice_max(n, n = 200) %>% #decide how many TOP words to take into consideration
+  pull(word)
+
+word_frequency <- workaway_no_filtered_help %>% 
+  #filter(!is.na(feedback_total)) %>% #we take top200 words from all the data in "workaway" variable, however we make models only for these variables where there are no "NA" values for independent variable
+  mutate(feedback_total = case_when(feedback_total >= 15.0 ~ 15,
+                                  feedback_total >= 14.0 ~ 14,
+                                  feedback_total >= 13.0 ~ 13,
+                                  TRUE ~ 12)) %>%
+  count(word, feedback_total) %>%
+  complete(word, feedback_total, fill = list(n = 0)) %>%
+  group_by(feedback_total) %>%
+  mutate(
+    total = sum(n),
+    proportion = n / total
+  ) %>%
+  ungroup() %>%
+  filter(word %in% top_200_help)
+
+word_frequency
+
+word_modeling <-
+  word_frequency %>%
+  nest(data = c(feedback_total, n, total, proportion)) %>%
+  mutate(
+    model = map(data, ~ glm(cbind(n, total) ~ feedback_total, ., family = "binomial")),
+    model = map(model, tidy)
+  ) %>%
+  unnest(model) %>%
+  filter(term == "feedback_total") %>%
+  mutate(p.value = p.adjust(p.value)) %>%
+  arrange(-estimate)
+
+word_modeling
+
+library(ggrepel)
+word_modeling %>%
+  ggplot(aes(estimate, p.value)) +
+  geom_vline(xintercept = 0, lty = 2, alpha = 0.7, color = "gray50") +
+  geom_point(color = "lightblue", alpha = 0.8, size = 2.5, shape = 16) +
+  scale_y_log10() +
+  geom_text_repel(aes(label = word), 
+                  
+                  seed = 2222,
+                  max.time = 1,
+                  max.iter = 40000,
+                  max.overlaps = 20,
+                  #arrow = arrow(length = unit(0.01, "npc")),
+                  box.padding = 0.1)
+
+higher_words_help <-
+  word_modeling %>%
+  filter(p.value < 0.05) %>%
+  filter(estimate > 0) %>% 
+  slice_max(estimate, n = 10) %>%
+  pull(word)
+lower_words_help <-
+  word_modeling %>%
+  filter(p.value < 0.05) %>%
+  filter(estimate < 0) %>% 
+  slice_max(-estimate, n = 10) %>%
+  pull(word)
+# higher_words_help <- higher_words_help_temp %>% anti_join(lower_words_help_temp) %>% pull(word)
+# lower_words_help <- lower_words_help_temp %>% anti_join(higher_words_help_temp) %>% pull(word)
+
+word_frequency %>%
+  filter(word %in% lower_words_help) %>%
+  ggplot(aes(feedback_total, proportion, color = word)) +
+  geom_line(size = 1.5, alpha = 0.7, show.legend = FALSE) +
+  facet_wrap(vars(word), scales = "free_y") +
+  #scale_x_continuous(labels = scales::dollar) +
+  #scale_y_continuous(labels = scales::percent, limits = c(0, NA)) +
+  labs(x = NULL, y = "proportion of total words used against Total Feedback",
+       title = "TOP LOWER WORDS help") +
+  theme(strip.text = element_text(size = 15))
+
+word_frequency %>%
+  filter(word %in% higher_words_help) %>%
+  ggplot(aes(feedback_total, proportion, color = word)) +
+  geom_line(size = 1.5, alpha = 0.7, show.legend = FALSE) +
+  facet_wrap(vars(word), scales = "free_y") +
+  #scale_x_continuous(labels = scales::dollar) +
+  #scale_y_continuous(labels = scales::percent, limits = c(0, NA)) +
+  labs(x = NULL, y = "proportion of total words used against Total Feedback",
+       title = "TOP HIGHER WORDS help") +
+  theme(strip.text = element_text(size = 15))
+
+higher_help_model <- glue::glue_collapse(higher_words_help, sep = "|")
+# higher_help_model <- str_replace_all(higher_help_model, "\\|{2,10}", "\\|")
+# higher_help_model <- str_remove(higher_help_model, "^\\||\\|$")
+# higher_help_model <- higher_words_help
+
+lower_help_model <- glue::glue_collapse(lower_words_help, sep = "|")
+# lower_help_model <- str_replace_all(lower_help_model, "\\|{2,10}", "\\|")
+# lower_help_model <- str_remove(lower_help_model, "^\\||\\|$")
+# lower_help_model <- lower_words_help
+```
+```{r GLM model4 - what_else_cultural_exchange-feedback}
+top_200_other <- 
+  workaway_no_filtered_other %>%
+  filter(!str_detect(word, "([A-Z;a-z]+s$)")) %>% #additional line - removing the plurals
+  count(word, sort = T) %>% 
+  slice_max(n, n = 200) %>% #decide how many TOP words to take into consideration
+  pull(word)
+
+word_frequency <- workaway_no_filtered_other %>% 
+  #filter(!is.na(feedback_total)) %>% #we take top200 words from all the data in "workaway" variable, however we make models only for these variables where there are no "NA" values for independent variable
+  mutate(feedback_total = case_when(feedback_total >= 15.0 ~ 15,
+                                  feedback_total >= 14.0 ~ 14,
+                                  feedback_total >= 13.0 ~ 13,
+                                  TRUE ~ 12)) %>%
+  count(word, feedback_total) %>%
+  complete(word, feedback_total, fill = list(n = 0)) %>%
+  group_by(feedback_total) %>%
+  mutate(
+    total = sum(n),
+    proportion = n / total
+  ) %>%
+  ungroup() %>%
+  filter(word %in% top_200_other)
+
+word_frequency
+
+word_modeling <-
+  word_frequency %>%
+  nest(data = c(feedback_total, n, total, proportion)) %>%
+  mutate(
+    model = map(data, ~ glm(cbind(n, total) ~ feedback_total, ., family = "binomial")),
+    model = map(model, tidy)
+  ) %>%
+  unnest(model) %>%
+  filter(term == "feedback_total") %>%
+  mutate(p.value = p.adjust(p.value)) %>%
+  arrange(-estimate)
+
+word_modeling
+
+word_modeling %>%
+  ggplot(aes(estimate, p.value)) +
+  geom_vline(xintercept = 0, lty = 2, alpha = 0.7, color = "gray50") +
+  geom_point(color = "lightblue", alpha = 0.8, size = 2.5, shape = 16) +
+  scale_y_log10() +
+  geom_text_repel(aes(label = word), 
+                  
+                  seed = 2222,
+                  max.time = 1,
+                  max.iter = 40000,
+                  max.overlaps = 20,
+                  #arrow = arrow(length = unit(0.01, "npc")),
+                  box.padding = 0.1)
+
+higher_words_other <-
+  word_modeling %>%
+  filter(p.value < 0.05) %>%
+  filter(estimate > 0) %>% 
+  slice_max(estimate, n = 10) %>%
+  pull(word)
+lower_words_other <-
+  word_modeling %>%
+  filter(p.value < 0.05) %>%
+  filter(estimate < 0) %>% 
+  slice_max(-estimate, n = 10) %>%
+  pull(word)
+# higher_words_other <- higher_words_other_temp %>% anti_join(lower_words_other_temp) %>% pull(word)
+# lower_words_other <- lower_words_other_temp %>% anti_join(higher_words_other_temp) %>% pull(word)
+
+word_frequency %>%
+  filter(word %in% lower_words_other) %>%
+  ggplot(aes(feedback_total, proportion, color = word)) +
+  geom_line(size = 1.5, alpha = 0.7, show.legend = FALSE) +
+  facet_wrap(vars(word), scales = "free_y") +
+  #scale_x_continuous(labels = scales::dollar) +
+  #scale_y_continuous(labels = scales::percent, limits = c(0, NA)) +
+  labs(x = NULL, y = "proportion of total words used against Total Feedback",
+       title = "TOP LOWER WORDS other") +
+  theme(strip.text = element_text(size = 15))
+
+word_frequency %>%
+  filter(word %in% higher_words_other) %>%
+  ggplot(aes(feedback_total, proportion, color = word)) +
+  geom_line(size = 1.5, alpha = 0.7, show.legend = FALSE) +
+  facet_wrap(vars(word), scales = "free_y") +
+  #scale_x_continuous(labels = scales::dollar) +
+  #scale_y_continuous(labels = scales::percent, limits = c(0, NA)) +
+  labs(x = NULL, y = "proportion of total words used against Total Feedback",
+       title = "TOP HIGHER WORDS other") +
+  theme(strip.text = element_text(size = 15))
+
+higher_other_model <- glue::glue_collapse(higher_words_other, sep = "|")
+# higher_other_model <- str_replace_all(higher_other_model, "\\|{2,10}", "\\|")
+# higher_other_model <- str_remove(higher_other_model, "^\\||\\|$")
+# higher_other_model <- higher_words_other
+
+lower_other_model <- glue::glue_collapse(lower_words_other, sep = "|")
+# lower_other_model <- str_replace_all(lower_other_model, "\\|{2,10}", "\\|")
+# lower_other_model <- str_remove(lower_other_model, "^\\||\\|$")
+# lower_other_model <- lower_words_other
+```
+```{r Comparison of GLM extracted words}
+length(high_desc = higher_words_description)=20
+length(low_desc = lower_words_description)=20
+length(high_accom = higher_words_accomodation)=20
+length(low_accom = lower_words_accomodation)=20
+length(high_help = higher_words_help)=20
+length(low_help = lower_words_help)=20
+length(high_other = higher_words_other)=20
+length(low_other = lower_words_other)=20
+
+extracted_words_200_top15 <- list2DF(
+  list(high_desc = higher_words_description,
+       low_desc = lower_words_description,
+       high_accom = higher_words_accomodation,
+       low_accom = lower_words_accomodation,
+       high_help = higher_words_help,
+       low_help = lower_words_help,
+       high_other = higher_words_other,
+       low_other = lower_words_other)
+  )
+
+View(extracted_words_200_top15)
+```
+
+```{r Sentiments and emotions - Description}
+library(sentimentr)
+tictoc::tic()
+
+emotions <- lexicon::nrc_emotions
+emotionFeatures_description <- workaway %>%  
+  filter(!is.na(feedback_total)) %>%
+  select(title, description) %>% 
+  mutate(across(.cols = description, ~str_replace_na(.x))) %>% 
+  unnest_tokens(word, "description") %>% 
+  filter(word %in% emotions$term) %>% 
+  left_join(emotions, by = c("word" = "term")) %>% 
+  select(-word) %>% 
+  select(title,anger, anticipation, disgust, fear, joy, sadness, surprise, trust) %>%
+  group_by(title) %>% 
+  summarise(across(.cols = anger:trust, .fns = ~sum(.x))) %>%
+  left_join(workaway %>% filter(!is.na(feedback_total)) %>% select(title, description) %>%
+              unnest_tokens(word, "description") %>% 
+              group_by(title) %>% 
+              count(title), 
+            by = c("title" = "title")) %>%
+  gather(key = "sentiment", value = "score", -title, -n) %>% 
+  mutate(score = score/n) %>% #Averages the sentiment by word count
+  select(-n) %>% 
+  spread(sentiment, score) %>% 
+  rename("anger.emotion.desc" = anger,
+         "anticipation.emotion.desc" = anticipation,
+         "digust.emotion.desc" = disgust,
+         "fear.emotion.desc" = fear,
+         "joy.emotion.desc" = joy,
+         "sadness.emotion.desc" = sadness,
+         "surprise.emotion.desc" = surprise,
+         "trust.emotion.desc" = trust)
+
+description_sentences <- workaway %>% #_joined %>% 
+  filter(!is.na(feedback_total)) %>%  ##### IMPORTANT LINE !!!!
+  select(title, description) %>% 
+  mutate(across(.cols = description, ~str_replace_na(.x))) %>% 
+  get_sentences(workaway$description)
+
+sentence_number_desc <- description_sentences %>% ### Add number of sentences in description field
+  count(title, sentence_id) %>%
+  count(title, name = "sent_number_desc")
+
+tictoc::toc()
+tictoc::tic()
+
+sentiments_description <- cbind(
+  description_sentences %>%
+          sentiment(lexicon::hash_sentiment_huliu) %>%
+          rename("desc_huliu" = sentiment),
+  description_sentences %>% 
+          sentiment(lexicon::hash_sentiment_jockers_rinker) %>% 
+          select(sentiment) %>% 
+          rename("desc_jockers_rinker" = sentiment),
+  description_sentences %>% 
+          sentiment(lexicon::hash_sentiment_nrc) %>% 
+          select(sentiment) %>% 
+          rename("desc_nrc" = sentiment),
+  description_sentences %>% 
+          sentiment(lexicon::hash_sentiment_senticnet) %>% 
+          select(sentiment) %>% 
+          rename("desc_senticnet" = sentiment),
+  description_sentences %>%
+          sentiment(lexicon::hash_sentiment_sentiword) %>%
+          select(sentiment) %>%
+          rename("desc_sentiword" = sentiment))
+  # description_sentences %>% 
+  #         sentiment(lexicon::hash_sentiment_slangsd) %>% 
+  #         select(sentiment) %>% 
+  #         rename("slangsd" = sentiment))
+  # description_sentences %>% 
+  #         sentiment(lexicon::hash_sentiment_socal_google) %>% 
+  #         select(sentiment) %>% 
+  #         rename("socal_google" = sentiment))
+tictoc::toc()
+
+sentiments_description <- sentiments_description %>%
+  select(-c(element_id,sentence_id,word_count)) %>% 
+  pivot_longer(cols = desc_huliu:desc_sentiword, names_to = "sentiment", values_to = "score") %>%
+  group_by(title, sentiment) %>% 
+  summarize(score = mean(score)) %>% 
+  pivot_wider(names_from = "sentiment", values_from = "score") %>% 
+  left_join(sentence_number_desc) %>% 
+  left_join(workaway %>% filter(!is.na(feedback_total)) %>% select(title, description, feedback_total)) %>%
+  left_join(emotionFeatures_description) %>% 
+  unique() %>% 
+  ungroup()
+#View(sentiments_description)
+```
+```{r Sentiments and emotions - Total}
+library(sentimentr)
+tictoc::tic()
+
+emotions <- lexicon::nrc_emotions
+emotionFeatures_full <- workaway_joined %>%  
+  filter(!is.na(ww_avg)) %>%
+  select(title, full) %>% 
+  mutate(across(.cols = full, ~str_replace_na(.x))) %>% 
+  unnest_tokens(word, "full") %>% 
+  filter(word %in% emotions$term) %>% 
+  left_join(emotions, by = c("word" = "term")) %>% 
+  select(-word) %>% 
+  select(title,anger, anticipation, disgust, fear, joy, sadness, surprise, trust) %>%
+  group_by(title) %>% 
+  summarise(across(.cols = anger:trust, .fns = ~sum(.x))) %>%
+  left_join(workaway_joined %>% 
+              filter(!is.na(ww_avg)) %>% 
+              select(title, full) %>%
+              unnest_tokens(word, "full") %>% 
+              group_by(title) %>% 
+              count(title), 
+            by = c("title" = "title")) %>%
+  gather(key = "sentiment", value = "score", -title, -n) %>% 
+  mutate(score = score/n) %>% #Averages the sentiment by word count
+  select(-n) %>% 
+  spread(sentiment, score) %>% 
+  rename("anger.emotion.full" = anger,
+         "anticipation.emotion.full" = anticipation,
+         "digust.emotion.full" = disgust,
+         "fear.emotion.full" = fear,
+         "joy.emotion.full" = joy,
+         "sadness.emotion.full" = sadness,
+         "surprise.emotion.full" = surprise,
+         "trust.emotion.full" = trust)
+
+tictoc::toc()
+tictoc::tic()
+
+full_sentences <- workaway_joined %>% 
+  filter(!is.na(ww_avg)) %>%  ##### IMPORTANT LINE !!!!
+  select(title, full) %>% 
+  mutate(across(.cols = full, ~str_replace_na(.x))) %>% 
+  get_sentences(workaway_joined$full)
+
+sentence_number_full <- full_sentences %>% ### Add number of sentences in full field
+  count(title, sentence_id) %>%
+  count(title, name = "sent_number_full")
+
+sentiments_full <- cbind(
+  # full_sentences %>%
+  #         sentiment(lexicon::hash_sentiment_huliu) %>%
+  #         rename("full_huliu" = sentiment),
+  # full_sentences %>% 
+  #         sentiment(lexicon::hash_sentiment_jockers_rinker) %>% 
+  #         select(sentiment) %>% 
+  #         rename("full_jockers_rinker" = sentiment),
+  # full_sentences %>% 
+  #         sentiment(lexicon::hash_sentiment_nrc) %>% 
+  #         select(sentiment) %>% 
+  #         rename("full_nrc" = sentiment),
+  # full_sentences %>% 
+  #         sentiment(lexicon::hash_sentiment_senticnet) %>% 
+  #         select(sentiment) %>% 
+  #         rename("full_senticnet" = sentiment),
+  full_sentences %>%
+          sentiment(lexicon::hash_sentiment_sentiword) %>%
+          select(sentiment) %>%
+          rename("full_sentiword" = sentiment))
+  # full_sentences %>% 
+  #         sentiment(lexicon::hash_sentiment_slangsd) %>% 
+  #         select(sentiment) %>% 
+  #         rename("slangsd" = sentiment))
+  # full_sentences %>% 
+  #         sentiment(lexicon::hash_sentiment_socal_google) %>% 
+  #         select(sentiment) %>% 
+  #         rename("socal_google" = sentiment))
+
+tictoc::toc()
+
+beepr::beep(4)
+
+#sentiments_full_new <- sentiments_full %>%
+sentiments_full_new <- full_sentences %>%
+  # cbind(sentiments_full) %>% 
+  # #summarize(score = mean(full_sentiword)) %>% 
+  select(-c(element_id,sentence_id,full)) %>%
+  # pivot_longer(cols = full_sentiword, names_to = "sentiment", values_to = "score") %>%#cols = full_huliu:full_sentiword
+  # group_by(title, sentiment) %>%
+  # summarize(score = mean(score)) %>%
+  # pivot_wider(names_from = "sentiment", values_from = "score") %>%
+  left_join(sentence_number_full) %>%
+  left_join(workaway_joined %>%
+              filter(!is.na(ww_avg)) %>%
+              select(title, full, ww_avg)) %>%
+  left_join(emotionFeatures_full) %>%
+  unique() #%>%
+  # ungroup()
+
+```
+
+<h2>Modelling 'Host Rating' metric</h2>
+```{r Data - CLEANING - Regression}
+#workaway <- readRDS("workaway_joined_regression.rds")
+#run block no. 18 
+workaway_joined <- workaway %>% 
+  left_join(HOURS) %>% 
+  unique() %>% 
+  #left_join(sentiments_description) %>% 
+  #left_join(sentiments_full) %>% 
+  mutate(internet = (str_detect(internet_access, "TRUE") | str_detect(limited_internet, "TRUE")),
+         dec_date = decimal_date(last_activity),
+         hours_expected_cutted = case_when( 
+           hours_expected_calc >= 49 | is.na(hours_expected_calc) ~ "Unknown", 
+           hours_expected_calc > 25 ~ "More work",
+           hours_expected_calc == 25 ~ "Standard 25h",
+           TRUE ~ "Less work"
+           )) %>% #,
+         # number_of_photos_ltd = case_when( #because at certain stage, workaway decided to allow up to 15 photos, no use to treat cases with more photos differently
+         #   number_of_photos >= 15 ~ as.integer(15),
+         #   TRUE ~ as.integer(number_of_photos)
+         #   )
+         # ) %>% 
+  select(-c(feedback_accuracy, feedback_communication, feedback_cultural_exchange, hours_expected, digital_nomad, campervans, possibly_pets, internet_access, limited_internet, last_activity, hours_expected_calc, types_of_help, languages_spoken)) %>% 
+##### BLOCK WHICH WAS PRESENT IN PREVIOUS ITERATIONS AS DATA CLEANING + JOINING HOURS...  
+  mutate(min_stay = case_when(
+    min_stay == " Min stay requested: 1 month or more" | min_stay == " Min stay requested: at least 1 month" ~ "Long stay",
+    min_stay == " Min stay requested: at least 3 weeks" | min_stay == " Min stay requested: at least 2 weeks" | min_stay == " Min stay requested: at least a week" ~ "Average stay",
+    TRUE ~ "Minimum stay")) %>% 
+  # mutate(high_desc_words = str_detect(description, higher_description_model),
+  #        low_desc_words = str_detect(description, lower_description_model),
+  #        high_accom_words = str_detect(accomodation, higher_accomodation_model),
+  #        low_accom_words = str_detect(accomodation, lower_accomodation_model),
+  #        high_help_words = str_detect(help, higher_help_model),
+  #        low_help_words = str_detect(help, lower_help_model),
+  #        high_other_words = str_detect(what_else_cultural_exchange, higher_other_model),
+  #        low_other_words = str_detect(what_else_cultural_exchange, lower_other_model)        
+  #        ) %>% 
+  # mutate(across(high_desc_words:high_other_words, ~replace_na(.x, FALSE)),
+  #        across(where(is.character), as.factor),
+  #        across(where(is.logical), as.factor)
+  #        ) %>% 
+  select(-c(description, accomodation, help, what_else_cultural_exchange)) %>% 
+### 3rd host rating wrangling
+  mutate(
+    h_no_show = str_detect(h_comm, "No show"),
+    ww_no_show = str_detect(ww_comm, "Host cancelled stay at the last minute"),
+    h_comm = str_replace_all(h_comm, "Excellent", "5"),
+    h_comm = str_replace_all(h_comm, "Very good", "4"),
+    h_comm = str_replace_all(h_comm, "Good", "3"),
+    h_comm = str_replace_all(h_comm, "Neutral", "2"),
+    h_comm = str_replace_all(h_comm, "Negative", "1"),
+    h_comm = str_replace_all(h_comm, "No show", "0"),
+    h_comm = str_remove_all(h_comm, "[:punct:]"),
+    h_count = str_count(h_comm, "[:digit:]"),
+    h_sum = str_extract_all(h_comm, "[:digit:]") %>% map_dbl(~as.numeric(.x) %>% sum),
+    h_avg = h_sum / h_count,
+    ww_comm = str_replace_all(ww_comm, "Excellent", "5"),
+    ww_comm = str_replace_all(ww_comm, "Very good", "4"),
+    ww_comm = str_replace_all(ww_comm, "Good", "3"),
+    ww_comm = str_replace_all(ww_comm, "Neutral", "2"),
+    ww_comm = str_replace_all(ww_comm, "Negative", "1"),
+    ww_comm = str_replace_all(ww_comm, "Host cancelled stay at the last minute", "0"),
+    ww_comm = str_remove_all(ww_comm, "[:punct:]"),
+    ww_count = str_count(ww_comm, "[:digit:]"),
+    ww_sum = str_extract_all(ww_comm, "[:digit:]") %>% map_dbl(~as.numeric(.x) %>% sum),
+    ww_avg = ww_sum / ww_count
+    ) %>%
+  select(-c(h_comm, h_sum, ww_comm, ww_sum)) %>% 
+  filter(!is.na(ww_avg)) %>% #added
+  left_join(workaway_joined_new) %>% #added
+  select(-c(feedback_no, feedback_total, full, smokers, pets, internet, hosting_families, h_no_show)) %>%  #added
+  unique() #added
+
+#saveRDS(workaway_joined, "workaway_joined_regression.rds")
+
+set.seed(2222)
+spl <- workaway_joined %>%
+  select(c(title, country_host, host_rating, dec_date, reply_rate, average_reply_time, favourited, ww_count, ww_avg, number_of_photos)) %>% #warning removed feedback total
+  filter(!is.na(host_rating)) %>% 
+  mutate(reply_rate = replace_na(reply_rate, 0),
+         ww_avg = replace_na(ww_avg, 0)) %>% 
+  initial_split(prop = .8, strata = host_rating) 
+train <- training(spl)
+test <- testing(spl)
+
+mset <- metric_set(rsq, rmse)#mae
+set.seed(562)
+train_fold <- train %>%
+  vfold_cv(2, strata = host_rating)
+```
+```{r Definition - spot checking - REGRESSION HOST RATING}
+basic_rec <- recipe(host_rating ~ ., data = train) %>% 
+  update_role(title, new_role = "id") %>% 
+  step_other(country_host, threshold = 0.005)
+
+# 1st workflow set - Linear GLMNET
+lin_rec <- basic_rec %>%
+  step_impute_mean(all_numeric_predictors()) %>%
+  # step_novel(all_nominal_predictors()) %>%
+  # step_unknown(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  # step_impute_bag(reply_rate, impute_with = imp_vars(all_predictors()), trees=200, seed_val = 1112) %>%
+# step_ns(feedback_no, deg_free = tune("df_feedback_no")) %>%
+  step_ns(reply_rate, deg_free = tune("df_reply_rate")) %>%
+# step_ns(average_reply_time, deg_free = tune("df_average_reply_time")) %>%
+  step_zv(all_predictors()) #%>%
+  # prep() %>%
+  # bake(new_data = NULL) %>%
+  # View()
+
+# lin_interact_rec <- basic_rec %>% 
+#   step_mutate(reply_rate = replace_na(reply_rate, 0), 
+#          average_reply_time = replace_na(average_reply_time, 0)) %>% 
+#   step_log(feedback_no, base = 10, offset = 1) %>% 
+#   step_YeoJohnson(reply_rate, average_reply_time) %>% 
+#   step_interact(~all_numeric_predictors():all_numeric_predictors()) %>% 
+#   step_zv(all_predictors())# %>% 
+
+linear_reg_spec <-
+   linear_reg(penalty = tune()) %>%
+   set_engine("glmnet")
+# lin_param <-
+#    lin_rec %>%
+#    hardhat::extract_parameter_set_dials() %>%
+#    update(
+     # 'df_feedback_no' = deg_free(range = c(2, 4)),
+     # 'df_reply_rate' = deg_free(range = c(1, 4)))#,
+     # 'df_average_reply_time' = deg_free(range = c(1, 4)))
+# lin_param_int <-
+#    lin_interact_rec %>%
+#    hardhat::extract_parameter_set_dials() %>%
+#    update(
+#      'df_feedback_no_int' = deg_free(range = c(2, 4)),
+#      'df_reply_rate_int' = deg_free(range = c(1, 4)))#,
+#      'df_average_reply_time_int' = deg_free(range = c(1, 4)))
+basic_wfs <-
+   workflow_set(
+      preproc = list(splines = lin_rec),#, interaction = lin_interact_rec),
+      models = list(linear = linear_reg_spec),#, linear = linear_reg_spec),
+      cross = FALSE
+   )
+# basic_wfs <-
+#    basic_wfs %>%
+#    option_add(param_info = lin_param, id = "splines_linear")
+
+# basic_wfs <- 
+#   basic_wfs %>% 
+#   option_add(param_info = lin_param_int, id ="interaction_linear")
+
+
+#2nd workflow set - No preprocessing - trees
+no_preproc_rec <- basic_rec
+
+cart_spec <-
+   decision_tree(cost_complexity = tune(), min_n = tune()) %>%
+   set_engine("rpart") %>%
+   set_mode("regression")
+bag_cart_spec <-
+   bag_tree() %>%
+   set_engine("rpart", times = 50L) %>%
+   set_mode("regression")
+cubist_spec <-
+   cubist_rules(committees = tune(), neighbors = tune()) %>%
+   set_engine("Cubist")
+
+no_preproc_wfs <- workflow_set(
+  preproc = list(no_preproc = no_preproc_rec),
+  models = list(cart = cart_spec,
+                bag = bag_cart_spec,
+                cubist = cubist_spec),
+  cross = TRUE
+)
+
+# 3rd workflow set - FULL PREPROCESSING
+full_preproc_rec <- basic_rec %>%
+  step_impute_mean(all_numeric_predictors()) %>%
+  # step_novel(all_nominal_predictors()) %>%
+  # step_unknown(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  #step_impute_bag(reply_rate, impute_with = imp_vars(all_predictors()), trees=200, seed_val = 1112) %>%
+  step_YeoJohnson(dec_date, reply_rate, average_reply_time, favourited, ww_count, ww_avg, number_of_photos) %>%
+  step_normalize(dec_date, reply_rate, average_reply_time, favourited, ww_count, ww_avg, number_of_photos) %>%
+  step_pca(dec_date, reply_rate, average_reply_time, favourited, ww_count, ww_avg, number_of_photos, threshold = .9) %>%
+  step_zv(all_predictors()) #%>%
+  # prep() %>%
+  # bake(new_data = NULL) %>%
+  # glimpse()
+
+knn_spec <-
+   nearest_neighbor(neighbors = tune(), dist_power = tune(), weight_func = tune()) %>%
+   set_engine("kknn") %>%
+   set_mode("regression")
+nnet_spec <-
+   mlp(hidden_units = tune(), penalty = tune(), epochs = tune()) %>%
+   set_engine("nnet", MaxNWts = 2600) %>%
+   set_mode("regression")
+nnet_param <-
+   nnet_spec %>%
+   hardhat::extract_parameter_set_dials() %>%
+   update(hidden_units = hidden_units(c(1, 27)))
+svm_r_spec <-
+   svm_rbf(cost = tune(), rbf_sigma = tune()) %>%
+   set_engine("kernlab") %>%
+   set_mode("regression")
+svm_p_spec <-
+   svm_poly(cost = tune(), degree = tune()) %>%
+   set_engine("kernlab") %>%
+   set_mode("regression")
+
+full_preprocess_wfs <- workflow_set(
+  preproc = list(full_preproc = full_preproc_rec),
+  models = list(
+    knn = knn_spec,
+    mlp = nnet_spec,
+    svm_r =  svm_r_spec
+    #svm_p = svm_p_spec
+    ),
+  cross = TRUE
+)
+
+full_preprocess_wfs <-
+  full_preprocess_wfs %>%
+  option_add(param_info = nnet_param, id ="full_preproc_mlp")
+
+
+#4th workflow_set - 
+zv_impute_rec <- basic_rec %>% 
+# step_other(country_host, threshold = 0.05) %>% #best 0.05 for feedback_total
+  step_impute_mean(all_numeric_predictors()) %>%
+  # step_impute_knn(average_reply_time, impute_with = imp_vars(country_host),#, feedback_no),
+  #                 neighbors = 80) %>% #best 80 with country = 0.01
+  #                 #trees=200,
+  #                 #seed_val = 1112) %>%
+  # step_impute_knn(ww_avg, impute_with = imp_vars(country_host),
+  #                 neighbors = 100) %>% #best 100, country 0.05
+  #                 #trees=200,
+  #                 #seed_val = 1112) %>%
+  # step_novel(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  step_zv(all_predictors()) #%>%
+  # prep() %>%
+  # bake(new_data = NULL) %>%
+  # View()
+
+xgb_spec <- 
+   boost_tree(tree_depth = tune(), learn_rate = tune(), min_n = tune(), trees = tune()) %>% 
+   set_engine("xgboost") %>% 
+   set_mode("regression")
+# bayes_spec <- #classification only
+#   naive_Bayes() %>%
+#   set_engine('klaR')
+mars_spec <- # WARNING - requires dummy transformation!
+   mars(prod_degree = tune()) %>%  #<- use GCV to choose terms
+   set_engine("earth") %>%
+   set_mode("regression")
+
+zv_impute_wfs <- workflow_set(
+  preproc = list(zv_impute = zv_impute_rec),
+  models = list(xgb = xgb_spec, 
+#                bayes = bayes_spec, 
+                mars = mars_spec
+),
+  cross = TRUE
+)
+
+
+#5th workflow_set - Random Forest
+rf_rec <- basic_rec %>%
+  # step_impute_bag(reply_rate, impute_with = imp_vars(all_predictors()), trees=200, seed_val = 1112) %>%
+  step_impute_mean(all_numeric_predictors()) %>%
+  step_zv(all_predictors())
+
+rf_spec <-
+   rand_forest(mtry = tune(), min_n = tune(), trees = 1000) %>%
+   set_engine("ranger") %>%
+   set_mode("regression")
+rf_param <-
+   rf_spec %>%
+   hardhat::extract_parameter_set_dials() %>%
+   update(mtry = finalize(mtry(),train),
+          #mtry = mtry(range = c(2,36)),
+          #trees = trees(range = c(1000, 2000)),
+          min_n = min_n(range = c(2, 120)))
+
+rf_wfs <- workflow_set(
+  preproc = list(random_forest = rf_rec),
+  models = list(rf = rf_spec),
+  cross = TRUE
+)
+
+rf_wfs <-
+  rf_wfs %>%
+  option_add(param_info = rf_param, id ="random_forest_rf")
+
+#6th workflow_set - ONLY CLASSIFICATION PROBLEMS
+# zv_impute_decor_rec <- basic_rec %>% 
+#   step_mutate(reply_rate = replace_na(reply_rate, 0), 
+#          average_reply_time = replace_na(average_reply_time, 0)) %>% 
+#   step_date(last_activity, features = c("decimal"), keep_original_cols = FALSE) %>%
+#   step_pca(all_numeric_predictors(), threshold = .99) %>% 
+#   step_zv(all_predictors())# %>% 
+#   # prep() %>% 
+#   # bake(new_data = NULL) %>% 
+#   # glimpse()
+
+# fda_spec <- #classification only
+#   discrim_flexible(
+#     prod_degree = tune(),
+#   ) %>%
+#   set_engine('earth')
+# rda_spec <- #classification only
+#   discrim_regularized(frac_common_cov = tune(), frac_identity = tune()) %>%
+#   set_engine('klaR')
+# 
+# zv_impute_decor_wfs <- workflow_set(
+#   preproc = list(zv_impute_decor = zv_impute_decor_rec),
+#   models = list(fda = fda_spec, 
+#                 rda = rda_spec),
+#   cross = TRUE
+# )
+
+all_workflows <- 
+   bind_rows(
+     #basic_wfs,
+     rf_wfs,
+     no_preproc_wfs,
+     #full_preprocess_wfs,
+     zv_impute_wfs)
+     # zv_impute_decor_wfs)
+   # Make the workflow ID's a little more simple: 
+   # mutate(wflow_id = gsub("(simple_)|(normalized_)", "", wflow_id))
+all_workflows
+
+grid_ctrl <- control_grid(
+      save_pred = TRUE,
+      parallel_over = "resamples",
+      save_workflow = TRUE
+   )
+
+set.seed(2020)
+full_results_time <-
+   system.time(
+      grid_results_regression_spot_iter0 <-
+         all_workflows %>%
+         workflow_map(seed=1111, resamples = train_fold, grid = 4,
+                      control = grid_ctrl, verbose = TRUE, metrics =mset)
+   )/60
+saveRDS(grid_results_regression_spot_iter0,"grid_results_regression_spot_iter1.rds")
+
+autoplot(
+  grid_results_regression_spot_iter0,
+   rank_metric = "rmse",
+   metric = "rmse",
+   select_best = TRUE     #one point per workflow
+)
+```
+
+
+```{r Data - CLEANING NEURAL - Classification}
+workaway_joined <- workaway %>% 
+  ungroup() %>% 
+  #select(accomodation, feedback_total)
+  select(title, feedback_total, description, accomodation, help, what_else_cultural_exchange)
+
+set.seed(2222)
+spl <- workaway_joined %>%
+  filter(!is.na(feedback_total)) %>% 
+  mutate(feedback_total = case_when(
+    feedback_total > 12 ~ 1,
+    TRUE ~ 0
+  )) %>% 
+  initial_split(prop = 0.8, strata = feedback_total) 
+train <- training(spl)
+test <- testing(spl)
+set.seed(11122)
+train <- train[sample(1:nrow(train)),]
+test <- test[sample(1:nrow(test)),]
+
+mset <- metric_set(spec, sens, precision, mn_log_loss, roc_auc, f_meas, accuracy)
+set.seed(562)
+# train_fold <- train %>%
+#   vfold_cv(5, strata = feedback_total)
+
+train %>%
+  mutate(n_words = tokenizers::count_words(what_else_cultural_exchange)) %>%
+  ggplot(aes(n_words)) +
+  geom_bar() +
+  coord_cartesian(xlim = c(0, 400)) +
+  labs(x = "Number of words",
+       y = "Number of titles")
+```
+```{r DENSE Neural}
+library(keras)
+# library(tensorflow)
+max_words_what <- 10e3
+max_words_help <- 10e3
+max_words_accom <- 5e3
+max_words_desc <- 35e3 #best=35e3  30e3
+max_length_what <- 300
+max_length_help <- 200
+max_length_accom <- 200
+max_length_desc <- 250#best=250   300
+
+# basic_rec <- recipe(~title, data = train) %>%
+#   step_tokenize(title) %>%
+#   step_tokenfilter(title, max_tokens = max_words_title) %>%
+#   step_sequence_onehot(title, sequence_length = max_length_title, truncating = "post")
+
+basic_rec <- recipe(~ description+accomodation, data = train) %>%
+  step_tokenize(description) %>%
+  #step_tokenize(what_else_cultural_exchange) %>%
+  #step_tokenize(help) %>%
+  step_tokenize(accomodation) %>% 
+  step_tokenfilter(description, max_tokens = max_words_desc) %>%
+  #step_tokenfilter(what_else_cultural_exchange, max_tokens = max_words_what) %>%
+  #step_tokenfilter(help, max_tokens = max_words_help) %>%
+  step_tokenfilter(accomodation, max_tokens = max_words_accom) %>%
+  step_sequence_onehot(description, sequence_length = max_length_desc, truncating = "post") %>%
+  step_sequence_onehot(accomodation, sequence_length = max_length_accom, truncating = "post") #%>% 
+  #step_sequence_onehot(help, sequence_length = max_length_help, truncating = "post")
+  #step_sequence_onehot(what_else_cultural_exchange, sequence_length = max_length_what, truncating = "post")
+
+basic_prep <-  prep(basic_rec)
+basic_train <- bake(basic_prep, new_data = NULL, composition = "matrix")
+dim(basic_train)
+
+set.seed(1222)
+train_val <- validation_split(train, strata = feedback_total)
+basic_analysis <- bake(basic_prep, new_data = analysis(train_val$splits[[1]]),
+                      composition = "matrix")
+basic_assess <- bake(basic_prep, new_data = assessment(train_val$splits[[1]]),
+                    composition = "matrix")
+feedback_analysis <- analysis(train_val$splits[[1]]) %>% pull(feedback_total)
+feedback_assess <- assessment(train_val$splits[[1]]) %>% pull(feedback_total)
+```
+```{r Dense nerural network - computation}
+k_clear_session()
+
+dense_model <- keras_model_sequential() %>%
+  layer_embedding(input_dim = (max_words_desc + max_words_accom) + 1,
+                  output_dim = 12,#desc_best=12  II.accom_best=12
+                  input_length = max_length_desc + max_length_accom) %>%
+  layer_flatten() %>%
+  layer_dense(units = 64, activation = "relu") %>% #desc_best 64, (acc=0.77) auc=0.5775; TN=44, e/7  II.accom_best64, (acc=0.67) auc=0.5767; TN=58, e/10
+  layer_dense(units = 1, activation = "sigmoid")
+
+# dense_model <- keras_model_sequential() %>%
+#   layer_embedding(input_dim = (max_words_desc + max_words_help + max_words_accom) + 1,
+#                   output_dim = 12,# %>% #,#desc_best=12  II.accom_best=12
+#                   input_length = max_length_desc + max_length_help + max_length_accom) %>%
+#   bidirectional(layer_lstm(units = 32, dropout = 0.4,
+#                            recurrent_dropout = 0.4)) %>%
+#   layer_dense(units = 1, activation = "sigmoid")
+
+dense_model
+
+dense_model %>% compile(
+  optimizer = "adam",
+  loss = "binary_crossentropy",
+  metrics = list("Accuracy", "AUC", "FalsePositives", "TrueNegatives", "Recall"))
+#                 metric_specificity_at_sensitivity("x", 0.5))
+
+#full_results_time <- 
+#  system.time(
+# dense_history <- dense_model %>%
+#   fit(
+#     x = basic_analysis, #basic_train,
+#     y = feedback_analysis, #train$feedback_total,
+#     batch_size = 512,
+#     epochs = 7,
+#     validation_split = list(basic_assess, feedback_assess), #0.25,
+#     class_weight = list("0"=14,"1"=1),
+#     verbose = TRUE
+#   )
+#)/60
+dense_history <- dense_model %>%
+  fit(
+    x = basic_analysis,
+    y = feedback_analysis, 
+    batch_size = 4096, # desc_best2048  II.accom_best=1024
+    epochs = 15,#desc_best 7  II.accom_best=10
+    validation_data = list(basic_assess, feedback_assess), #0.25,
+    class_weight = list("0"=54,"1"=1), 
+    verbose = TRUE
+  )
+
+#plot(dense_history)
+
+val_res <- keras_predict(dense_model, basic_assess, feedback_assess)
+
+val_res %>%
+  conf_mat(state, .pred_class) %>%
+  autoplot(type = "heatmap")
+
+val_res %>%
+  roc_curve(truth = state, .pred_1) %>%
+  autoplot() +
+  labs(
+    title = "Receiver operator curve for Kickstarter blurbs"
+  )
+```
+
+```{r Data - CLEANING - SPARSE Classification}
+workaway_joined <- workaway %>% #remove _joined
+  left_join(HOURS) %>% 
+  unique() %>% 
+  #filter(!is.na(ww_avg)) %>%
+  #left_join(sentiments_description) %>% 
+  left_join(sentiments_full_new) %>% 
+  mutate(internet = (str_detect(internet_access, "TRUE") | str_detect(limited_internet, "TRUE")),
+         dec_date = decimal_date(last_activity),
+         hours_expected_cutted = case_when( 
+           hours_expected_calc >= 49 | is.na(hours_expected_calc) ~ "Unknown", 
+           hours_expected_calc > 25 ~ "More work",
+           hours_expected_calc == 25 ~ "Standard 25h",
+           TRUE ~ "Less work"
+           ),
+         # number_of_photos_ltd = case_when( #because at certain stage, workaway decided to allow up to 15 photos, no use to treat cases with more photos differently
+         #   number_of_photos >= 15 ~ as.integer(15),
+         #   TRUE ~ as.integer(number_of_photos)
+         #   )
+         # ) %>% 
+  select(-c(feedback_accuracy, feedback_communication, feedback_cultural_exchange, hours_expected, digital_nomad, campervans, possibly_pets, internet_access, limited_internet, last_activity, hours_expected_calc, types_of_help, languages_spoken)) %>% #HOST_RATING WAS REMOVED HERE!!!!!!
+##### BLOCK WHICH WAS PRESENT IN PREVIOUS ITERATIONS AS DATA CLEANING + JOINING HOURS...  
+  mutate(min_stay = case_when(
+    min_stay == " Min stay requested: 1 month or more" | min_stay == " Min stay requested: at least 1 month" ~ "Long stay",
+    min_stay == " Min stay requested: at least 3 weeks" | min_stay == " Min stay requested: at least 2 weeks" | min_stay == " Min stay requested: at least a week" ~ "Average stay",
+    TRUE ~ "Minimum stay")) %>% 
+  mutate(high_desc_words = str_detect(description, higher_description_model),
+         low_desc_words = str_detect(description, lower_description_model),
+         high_accom_words = str_detect(accomodation, higher_accomodation_model),
+         low_accom_words = str_detect(accomodation, lower_accomodation_model),
+         high_help_words = str_detect(help, higher_help_model),
+         low_help_words = str_detect(help, lower_help_model),
+         high_other_words = str_detect(what_else_cultural_exchange, higher_other_model),
+         low_other_words = str_detect(what_else_cultural_exchange, lower_other_model)        
+         ) %>% 
+  mutate(across(high_desc_words:high_other_words, ~replace_na(.x, FALSE)),
+         across(where(is.character), as.factor),
+         across(where(is.logical), as.factor)
+         ) %>% 
+  select(-c(description, accomodation, help, what_else_cultural_exchange, full)))
+beepr::beep(4)
+#saveRDS(workaway_joined, "workaway_joined_classification.rds")
+
+workaway_joined_new <- workaway_joined %>% 
+  select(title, sent_number_full, anger.emotion.full:trust.emotion.full, high_desc_words:low_other_words)
+```
+```{r Definition + computation - Sparse Classification ww_avg}
+workaway_joined_cl <- readRDS("workaway_joined_classification.rds")
+workaway <- readRDS("workaway_joined_regression.rds")
+
+set.seed(2222)
+spl <- workaway_joined_cl %>%
+  left_join(workaway %>% select(title, h_no_show:ww_avg)) %>% 
+  select(-c(feedback_no, feedback_total, h_avg, average_reply_time, h_no_show, ww_no_show)) %>% 
+  filter(!is.na(ww_avg)) %>%
+  mutate(reply_rate = replace_na(reply_rate, 0),
+         h_count = replace_na(h_count, 0),
+         ww_count = replace_na(ww_count, 0)) %>% 
+  mutate(ww_avg = case_when(
+    ww_avg >= 5 ~ "High",
+    TRUE ~ "Low"
+  ),
+  ww_avg = as.factor(ww_avg)) %>%
+  initial_split(prop = .9, strata = ww_avg) 
+train <- training(spl)
+test <- testing(spl)
+mset <- metric_set(roc_auc, spec, sens, precision, mn_log_loss, f_meas, accuracy)
+set.seed(562)
+train_fold <- train %>%
+  vfold_cv(2, strata = ww_avg) 
+
+
+library(hardhat)
+sparse_bp <- default_recipe_blueprint(composition = "dgCMatrix")
+
+basic_rec <- recipe(ww_avg ~ ., data = train) %>% 
+  update_role(title, new_role = "id") 
+
+
+full_preproc_rec <- basic_rec %>% 
+  step_tokenize(accomodation, description, help, what_else_cultural_exchange) %>%
+  step_tokenfilter(accomodation, description, help, what_else_cultural_exchange, max_tokens = tune()) %>%
+  step_tfidf(accomodation, description, help, what_else_cultural_exchange) #%>%
+  #step_normalize(all_predictors())
+  # prep() %>%
+  # bake(new_data = NULL) %>%
+  # View()
+
+
+logistic_spec <- logistic_reg(penalty = tune(), mixture = 1) %>%
+  set_mode("classification") %>%
+  set_engine("glmnet")
+
+#smaller_lambda <- grid_regular(penalty(range = c(-5, 0)), levels = 20)
+
+
+final_grid <- grid_regular(
+  penalty(range = c(-5, -1)),
+  max_tokens(range = c(500, 2e3)),
+  levels = c(penalty = 2, max_tokens = 1)
+)
+
+# full_preprocess_wfs <- workflow_set(
+#   preproc = list(full_preproc = full_preproc_rec),
+#   models = list(
+#     #svm = svm_spec
+#     log = linear_spec
+#     ),
+#   cross = TRUE
+# )
+
+sparse_wf <- workflow() %>%
+  add_recipe(full_preproc_rec, blueprint = sparse_bp) %>%
+  add_model(logistic_spec)
+```
+```{r Computation - sparse - CLASSIFICATION}
+grid_ctrl <-
+   control_grid(
+      save_pred = TRUE,
+      parallel_over = "resamples",
+      save_workflow = TRUE
+   )
+
+set.seed(2020)
+full_results_time <-
+   system.time(
+      grid_results_sparse1 <-
+         sparse_wf %>%
+         tune_grid(resamples = train_fold, grid = final_grid,
+                      control = grid_ctrl, verbose = TRUE, metrics=mset)
+   )/60
+
+#saveRDS(grid_results_sparse0, "grid_results_sparse0.rds")
+```
+```{r Classification SPARSE results}
+View(grid_results_classification_iter2 %>% 
+   collect_predictions(summarize = TRUE))
+View(grid_results_classification_iter1 %>% 
+   rank_results())
+
+autoplot(
+   grid_results_classification_iter2,
+   rank_metric = "spec",  # <- how to order models
+   metric = "spec",       # <- which metric to visualize
+   #id = "i.e. linear_wflow_id",
+   select_best = TRUE     # <- one point per workflow
+)
+
+autoplot(grid_results_classification_iter1, id = "random_forest_rf", metric = "f_meas")
+
+best_rf <- grid_results_classification_iter1 %>% 
+  extract_workflow_set_result("random_forest_rf") %>% 
+  select_best(metric = "precision")
+
+grid_results_classification_iter1 %>% 
+  extract_workflow_set_result("no_preproc_cart") %>% 
+  select_best(metric = "spec")
+
+# fit_rf <- grid_results_classification_iter1 %>% 
+#   extract_workflow("random_forest_rf") %>% 
+#   finalize_workflow(best_rf) %>% 
+#   fit(?)
+
+
+# conf_3<- grid_results_classification_iter1[2,] %>% collect_predictions() %>% filter(.config == "Preprocessor1_Model7") %>% mutate(as.factor(feedback_total))
+# 
+# yardstick::conf_mat(
+#   conf_3,
+#   feedback_total,
+#   .pred_class
+#   )
+
+
+yardstick::conf_mat(
+  grid_results_sparse0 %>% 
+    collect_predictions() %>% 
+    filter(.config == "Preprocessor2_Model1") %>% 
+    mutate(as.factor(feedback_total)),
+  feedback_total,
+  .pred_class)
+```
+```{r Model - ggpairs-feedback-total, warning=TRUE}
+library(GGally)
+workaway_joined %>%
+  filter(!is.na(host_rating)) %>% 
+  select(host_rating:dec_date) %>%
+  select(-c(internet, average_reply_time,full_huliu,full_jockers_rinker,full_sentiword)) %>%
+  #mutate(reply_rate = replace_na(reply_rate, 0)) %>% 
+  mutate(feedback_total = case_when(
+    feedback_total > 14.4 ~ "14.4",
+    TRUE ~ "Low"
+  )) %>%
+  select(host_rating:dec_date) %>%
+  select(-c(min_stay, workawayer_total)) %>%
+  select(feedback_total, host_rating, 2:17) %>% 
+  #glimpse()
+  ggpairs(columns = 2:17, aes(alpha = 0.5, color = feedback_total))
+
+  #filter(if_any(.cols = everything(), .fns = ~is.nan(.x))) 
+library(GGally)
+workaway %>%
+  filter(!is.na(host_rating)) %>%
+  select(3:8, 27:36) %>% 
+  select(-c(feedback_accuracy, feedback_cultural_exchange, feedback_communication)) %>% 
+  #glimpse()
+  # visdat::vis_miss()
+  ggpairs(columns = 1:13)#, aes(alpha = 0.5, color = feedback_total))
+```
+
+<p>Let's build a regression model which would predict the <i>host rating</i> based on the basic numeric variables plus  word tokens obtained from GLM models.</p>
+
+<p>Evaluation would be based on RMSE and observations from all countries included. The baseline score for performance comparison is:</p>
+```{r Baseline score RMSE - calc, eval=TRUE}
+workaway_joined <- readRDS("workaway_joined_regression.rds")
+set.seed(2222)
+spl <- workaway_joined %>%
+  filter(!is.na(host_rating)) %>%
+  select(-c("pets", "smokers", "hosting_families", "favourited", "min_stay", "workawayer_total", "number_of_photos")) %>% 
+  mutate(reply_rate = replace_na(reply_rate, 0)) %>%
+  initial_split(prop = .8, strata = host_rating) 
+
+train <- training(spl)
+test <- testing(spl)
+
+mset <- metric_set(rsq, rmse, mae)
+set.seed(2022)
+train_fold <- train %>%
+  vfold_cv(5, strata = host_rating)
+
+sd_calc <- train %>% 
+  filter(!is.na(host_rating))
+```
+```{r Baseline score RMSE - display, eval=TRUE, echo=TRUE, include=TRUE, cache=TRUE}
+sd(sd_calc$host_rating)
+```
+
+<p>First we perform spot checking using mixture of linear, nonlinear and ensemble models.</p>
+<p>10 different models were tuned via small grid latin hypercube.</p>
+```{r Read iter0 host rating, eval=TRUE, include=TRUE, cache=TRUE}
+grid_results_host_rating_iter0 <- readRDS("workflow_map_host_rating_iter0.rds")
+autoplot(
+   grid_results_host_rating_iter0,
+   rank_metric = "rmse",  
+   metric = "rmse",       
+   select_best = TRUE     #one point per workflow
+)
+```
+<p>As we see apart from MultivariateAdaptiveRegressionSplines, RandomForest, XGBoost and Cubist, the rest of the models underperformed, therefore would be excluded from further evaluation.</p>
+
+<p>We also look at variable importance measures of 2 of the well-performing models - XGboost and Cubist. DALEXetra package was used for this purpose.</p>
+```{r VIP - best xgb, eval=TRUE, include=TRUE, cache=TRUE}
+ggplot_imp <- function(...) {
+  obj <- list(...)
+  metric_name <- attr(obj[[1]], "loss_name")
+  metric_lab <- paste(metric_name, 
+                      "after permutations\n(higher indicates more important)")
+  
+  full_vip <- bind_rows(obj) %>%
+    filter(variable != "_baseline_")
+  
+  perm_vals <- full_vip %>% 
+    filter(variable == "_full_model_") %>% 
+    group_by(label) %>% 
+    summarise(dropout_loss = mean(dropout_loss))
+  
+  p <- full_vip %>%
+    filter(variable != "_full_model_") %>% 
+    mutate(variable = fct_reorder(variable, dropout_loss)) %>%
+    ggplot(aes(dropout_loss, variable)) 
+  if(length(obj) > 1) {
+    p <- p + 
+      facet_wrap(vars(label)) +
+      geom_vline(data = perm_vals, aes(xintercept = dropout_loss, color = label),
+                 size = 1.4, lty = 2, alpha = 0.7) +
+      geom_boxplot(aes(color = label, fill = label), alpha = 0.2)
+  } else {
+    p <- p + 
+      geom_vline(data = perm_vals, aes(xintercept = dropout_loss),
+                 size = 1.4, lty = 2, alpha = 0.7) +
+      geom_boxplot(fill = "#91CBD765", alpha = 0.4)
+    
+  }
+  p +
+    #heme(legend.position = "none") +
+    labs(x = metric_lab, 
+         y = NULL,  fill = NULL,  color = NULL)
+}
+
+vip_XGB <- readRDS("vip_XGB_host_rating_iter0.rds")
+vip_XGB$label <- "XGboost"
+vip_Cubist <- readRDS("vip_Cubist_host_rating_iter0.rds")
+vip_Cubist$label <- "Cubist"
+ggplot_imp(vip_XGB, vip_Cubist)
+```
+
+<p>Conformity between models regarding predictors importance means that these ones are indeed influenatial.</p>
+<p>However only a few of predictors really matters, with <i>reply rate</i> being in the lead:</p>
+- reply rate - percentage of messages replied by host
+- feedback no - number of feedbacks
+- feedback total - summarized user rating (communication, cultural exchange, accuracy of profile)
+- dec date - host's last time of activity on the portal 
+
+<p>It might be beneficial to look at this stage again at completeness of data:</p>
+
+```{r Missing Data Regression, eval=TRUE, include=TRUE, cache=TRUE}
+workaway_missing_regression <- workaway %>% 
+  left_join(HOURS) %>% 
+  unique() %>% 
+  #filter(!is.na(feedback_total)) %>%
+  #left_join(sentiments_description) %>% 
+  #left_join(sentiments_full) %>% 
+  mutate(internet = (str_detect(internet_access, "TRUE") | str_detect(limited_internet, "TRUE")),
+         dec_date = decimal_date(last_activity),
+         hours_expected_cutted = case_when( 
+           hours_expected_calc >= 49 | is.na(hours_expected_calc) ~ "Unknown", 
+           hours_expected_calc > 25 ~ "More work",
+           hours_expected_calc == 25 ~ "Standard 25h",
+           TRUE ~ "Less work"
+           ),
+         number_of_photos_ltd = case_when( #because at certain stage, workaway decided to allow up to 15 photos, no use to treat cases with more photos differently
+           number_of_photos >= 15 ~ as.integer(15),
+           TRUE ~ as.integer(number_of_photos)
+           )
+         ) %>% 
+  select(-c(feedback_accuracy, feedback_communication, feedback_cultural_exchange, hours_expected, digital_nomad, campervans, possibly_pets, internet_access, limited_internet, last_activity, number_of_photos, hours_expected_calc, types_of_help, languages_spoken)) %>% 
+##### BLOCK WHICH WAS PRESENT IN PREVIOUS ITERATIONS AS DATA CLEANING + JOINING HOURS...  
+  mutate(min_stay = case_when(
+    min_stay == " Min stay requested: 1 month or more" | min_stay == " Min stay requested: at least 1 month" ~ "Long stay",
+    min_stay == " Min stay requested: at least 3 weeks" | min_stay == " Min stay requested: at least 2 weeks" | min_stay == " Min stay requested: at least a week" ~ "Average stay",
+    TRUE ~ "Minimum stay")) %>% 
+  # mutate(high_desc_words = str_detect(description, higher_description_model),
+  #        low_desc_words = str_detect(description, lower_description_model),
+  #        high_accom_words = str_detect(accomodation, higher_accomodation_model),
+  #        low_accom_words = str_detect(accomodation, lower_accomodation_model),
+  #        high_help_words = str_detect(help, higher_help_model),
+  #        low_help_words = str_detect(help, lower_help_model),
+  #        high_other_words = str_detect(what_else_cultural_exchange, higher_other_model),
+  #        low_other_words = str_detect(what_else_cultural_exchange, lower_other_model)        
+  #        ) %>% 
+  mutate(
+    #across(high_desc_words:high_other_words, ~replace_na(.x, FALSE)),
+         across(where(is.character), as.factor),
+         across(where(is.logical), as.factor)
+         ) %>% 
+  select(title, host_rating, reply_rate, feedback_no, feedback_total, average_reply_time, dec_date, hours_expected_cutted)
+
+set.seed(2222)
+spl <- workaway_missing_regression %>%
+  filter(!is.na(host_rating)) %>% 
+  initial_split(prop = .9, strata = host_rating) 
+train <- training(spl)
+
+visdat::vis_miss(train %>% select(-c(host_rating, title)))
+```
+<p></p>
+- 31% data missing
+- it's common that if 1 value is missing, 2 or even 3 other variables are missing as well
+- <i>reply rate</i> is missing in 47% total, and it's the most meaningful of all!
+
+<p>Let's look directly on the relationship <i>reply rate</i> 'missingness' vs. dependent variable in the training set:</p>
+```{r Misssing host rating reply rate, eval=TRUE, include=TRUE, cache=TRUE}
+train %>% #before it was workaway_missing_regression
+    filter(!is.na(host_rating)) %>% 
+    mutate(host_rating = case_when(
+    host_rating >= 100 ~ 100,
+    host_rating > 90 ~ 90,
+    host_rating > 80 ~ 80,
+    host_rating > 70 ~ 70,
+    host_rating > 60 ~ 60,
+    TRUE ~ 50
+  )) %>% 
+  count(host_rating, reply_rate) %>%
+  group_by(host_rating) %>% 
+  mutate(sum = sum(n),
+         per = n/sum) %>%
+  ungroup() %>% 
+  mutate(reply_rate = case_when(
+    is.na(reply_rate) ~ "Missing",
+    TRUE ~ "OK"
+  )) %>% 
+  #mutate(host_rating = fct_reorder(reply_rate,per,min,.desc = TRUE)) %>% 
+  ggplot(aes(host_rating, per, fill = reply_rate)) + 
+  geom_col() +
+  scale_x_continuous(breaks = seq(50, 100, by = 10)) +
+  scale_y_continuous(breaks = seq(0, 1, by = 0.1), labels = percent) +
+  labs(x = "Host rating",
+       y = "",
+       title = "Completeness of data regarding Reply Rate",
+       subtitle = "Reply rate is the most meaningful variable",
+       fill = "'Reply rate' status")
+```
+
+<p>That's a truly disappointing discovery! <i>Reply rate</i> is so hard-connected to our dependent variable, but it's also a missing one. 
+After trying several attempts of unsuccessful imputation with different methods I decided to go back to Workaway portal... And it occurred there might be a <b>third metric</b>! Just near every user/host comment there is 1 to 5 stars scale (initially I thought this is part of <i>feedback total</i>). <b>We put it into the dataset then!</b></p>
+<p>New variables are:</p>
+<p>- h_count - number of comments left by HOST 
+- h_avg - averaged star-rating of above
+- ww_count - number of WORKAWAY comments left from workawayer for a host 
+- ww_avg - averaged star-rating of above
+- favourited - how many workawayers clicked 'a like button'</p>
+
+<p>Double-check correlation with previous variables:</p>
+```{r Correlation, eval=TRUE, include=TRUE, cache=TRUE}
+library(GGally)
+workaway_missing_regression <- readRDS("workaway_download_01_10_new_rating.rds") %>% #workaway %>%  !!!!! removing reading from file
+  unique() %>% 
+  select(host_rating, feedback_no, feedback_total, feedback_total, h_count, ww_count, h_avg, ww_avg)
+
+set.seed(2222)
+spl <- workaway_missing_regression %>%
+  filter(!is.na(host_rating)) %>% 
+  initial_split(prop = .9, strata = host_rating) 
+train <- training(spl)
+
+train %>%
+  filter(!is.na(host_rating)) %>%
+  ggpairs(columns = 1:7)#, aes(alpha = 0.5, color = feedback_total))
+```
+    
+<p>Four new predictors are highly correlated to previous <i>feedback total</i> and <i>feedback_no</i>, we could safely exclude them as new variables already contain its information (for example <i>h_count</i> and <i>ww_count</i> summarize to <i>feedback_no</i>).</p>
+
+Now we perform a thorough tune-search on one of the best performing models from earlier spot-checking - XGBoost. This time with new variables added.
+
+<h3>Host Rating Evaluation</h3>
+<p>We evaluate results using 10-fold CV. The best results are:</p>
+```{r XGB Tune - host rating}
+set.seed(2222)
+spl <- workaway_joined %>%
+  select(c(title, h_count, host_rating, dec_date, reply_rate, average_reply_time, favourited, ww_count, ww_avg, number_of_photos)) %>% #removed country_host, added h_count instead
+  filter(!is.na(host_rating)) %>% 
+  mutate(reply_rate = replace_na(reply_rate, 0)) %>% 
+  #        ww_avg = replace_na(ww_avg, 0)) %>% 
+  initial_split(prop = .8, strata = host_rating) 
+train <- training(spl)
+test <- testing(spl)
+
+mset <- metric_set(rsq, rmse)#mae
+set.seed(562)
+train_fold <- train %>%
+  vfold_cv(5, strata = host_rating)
+
+
+basic_rec <- recipe(host_rating ~ ., data = train) %>% 
+  update_role(title, new_role = "id") #%>%
+  # step_other(country_host, threshold = tune())
+
+#4th workflow_set - 
+zv_impute_rec <- basic_rec %>% 
+  #step_other(country_host, threshold = 0.05) %>% #best 0.05 for feedback_total
+  # step_impute_knn(average_reply_time, impute_with = imp_vars(country_host),#, feedback_no),
+  #                 neighbors = 80) %>% #best 80 with country = 0.01
+  #                 #trees=200,
+  #                 #seed_val = 1112) %>%
+  # step_impute_knn(feedback_total, impute_with = imp_vars(country_host, feedback_no),
+  #                 neighbors = 100) %>% #best 100, country 0.05
+  #                 #trees=200,
+  #                 #seed_val = 1112) %>%
+  # step_novel(all_nominal_predictors()) %>%
+  step_impute_mean(all_numeric_predictors()) %>% 
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  step_zv(all_predictors()) #%>%  
+  # prep() %>%
+  # bake(new_data = NULL) %>%
+  # View()
+  
+xgb_spec <- 
+   boost_tree(tree_depth = tune(), learn_rate = tune(), min_n = tune(), trees = 1000) %>% 
+   set_engine("xgboost") %>% 
+   set_mode("regression")
+
+xgb_wfl <- workflow() %>%
+  add_recipe(zv_impute_rec) %>% 
+  add_model(xgb_spec)
+
+xgb_param_bayes <- xgb_wfl %>%
+  hardhat::extract_parameter_set_dials() %>% 
+  update(
+    tree_depth = tree_depth(c(6,15)),#3, 30
+    learn_rate = learn_rate(c(-2.75, -2.0)))
+    min_n = min_n(c(7,40))#18,40
+    #threshold  = threshold(c(0.001, 0.01))
+    #trees = trees(c(1000,2000))
+    #)
+
+# ctrl_bayes <- control_bayes(verbose = TRUE,
+#                             parallel_over = "resamples",
+#                             save_pred = TRUE, #can only be used if the initial results saved predictions
+#                             save_workflow = TRUE,
+#                             no_improve = 10L
+#                             )
+
+
+#xgb_bo_v2 <- readRDS("xgb_bo_v2.rds")
+#xgb_param <- xgb_wfl %>% hardhat::extract_parameter_set_dials()
+grid_ctrl <-
+   control_grid(
+      save_pred = TRUE,
+      parallel_over = "resamples",
+      save_workflow = TRUE
+   )
+
+bo_time_xgb <- system.time({
+set.seed(9009)
+grid_results_host_rating_comm2 <- xgb_wfl %>%
+  tune_grid(
+    resamples = train_fold,
+    metrics = mset,
+    #initial = grid_results_host_rating_iter7, 
+    param_info = xgb_param_bayes,
+    grid = 2,
+    #grid = a_param %>% grid_regular(levels = 4),
+    #iter = 30,
+    control = grid_ctrl#ctrl_bayes
+  )
+}
+)/60
+#saveRDS(grid_results_host_rating_comm3, "grid_results_host_rating_comm3_xgb.rds")
+beepr::beep(4)
+
+autoplot(
+   grid_results_host_rating_comm2,
+   rank_metric = "rsq",
+   metric = "rsq",
+   select_best = TRUE     #one point per workflow
+)
+```
+
+```{r XGB Resamples results, eval=TRUE, include=TRUE}
+grid_results_host_rating_comm3 <- readRDS("grid_results_host_rating_comm3_xgb.rds")
+grid_results_host_rating_comm3 %>% 
+  collect_metrics() %>% 
+  select(-threshold) %>% 
+  filter(.config == "Preprocessor3_Model1")
+```
+<p>  </p>
+<p>Last fit on test set to confirm we are not overfitting:</p>
+```{r XGB Last results, eval=TRUE, include=TRUE, cache=TRUE}
+# best_XGB <- grid_results_host_rating_comm3 %>%
+#   extract_workflow() %>%
+#   finalize_workflow(select_best(grid_results_host_rating_comm3))
+# last_xgb <- last_fit(best_XGB, spl)
+# # saveRDS(last_xgb, "last_xgb.rds")
+last_xgb <- readRDS("last_xgb.rds")
+last_xgb %>% collect_metrics()
+```
+<p>  \n </p>  
+<p>XGboost model in conjunction with parsnip package has functionality of calculating importance scores directly from fitted model, let's use it:</p>
+```{r Vip - xgb iternal, fig.height=3, eval=TRUE, include=TRUE}
+library(vip)
+full_data_fit_xgb <-
+  grid_results_host_rating_comm3 %>%
+  extract_workflow() %>%
+  finalize_workflow(select_best(grid_results_host_rating_comm3, metric = "rsq")
+                    ) %>%
+  fit(workaway_joined %>%  #fit full_data
+    select(c(title, country_host, host_rating, dec_date, reply_rate, average_reply_time, favourited, ww_count, ww_avg, number_of_photos)) %>%
+  filter(!is.na(host_rating)) %>%
+  mutate(reply_rate = replace_na(reply_rate, 0))
+  )#
+# saveRDS(full_data_fit_xgb, "full_data_fit_xgb.rds")
+# full_data_fit_xgb <- readRDS("full_data_fit_xgb.rds")
+full_data_fit_xgb %>% 
+  extract_fit_parsnip() %>% 
+  vip(num_features = 6)
+```
+
+<p>Difference between resamples and testing set is minimal, both in terms on RMSE and R-squared.</p>
+<p>Again we have <i>reply rate</i> on the first position with huge importance, however this time on the second place jumped <i>ww_avg</i> (average score left for the host), which was exchanged for the previously used <i>feedback_total</i>.</p>
+
+<h2>Modelling 'Star' metric</h2>
+```{r Data - CLEANING - Classification}
+workaway_joined <- workaway %>% 
+  left_join(HOURS) %>% 
+  unique() %>% 
+  filter(!is.na(feedback_total)) %>%
+  #left_join(sentiments_description) %>% 
+  left_join(sentiments_full) %>% 
+  mutate(internet = (str_detect(internet_access, "TRUE") | str_detect(limited_internet, "TRUE")),
+         dec_date = decimal_date(last_activity),
+         hours_expected_cutted = case_when( 
+           hours_expected_calc >= 49 | is.na(hours_expected_calc) ~ "Unknown", 
+           hours_expected_calc > 25 ~ "More work",
+           hours_expected_calc == 25 ~ "Standard 25h",
+           TRUE ~ "Less work"
+           ),
+         number_of_photos_ltd = case_when( #because at certain stage, workaway decided to allow up to 15 photos, no use to treat cases with more photos differently
+           number_of_photos >= 15 ~ as.integer(15),
+           TRUE ~ as.integer(number_of_photos)
+           )
+         ) %>% 
+  select(-c(feedback_accuracy, feedback_communication, feedback_cultural_exchange, hours_expected, digital_nomad, campervans, possibly_pets, internet_access, limited_internet, last_activity, number_of_photos, hours_expected_calc, types_of_help, languages_spoken)) %>% #HOST_RATING WAS REMOVED HERE!!!!!!
+##### BLOCK WHICH WAS PRESENT IN PREVIOUS ITERATIONS AS DATA CLEANING + JOINING HOURS...  
+  mutate(min_stay = case_when(
+    min_stay == " Min stay requested: 1 month or more" | min_stay == " Min stay requested: at least 1 month" ~ "Long stay",
+    min_stay == " Min stay requested: at least 3 weeks" | min_stay == " Min stay requested: at least 2 weeks" | min_stay == " Min stay requested: at least a week" ~ "Average stay",
+    TRUE ~ "Minimum stay")) %>% 
+  mutate(high_desc_words = str_detect(description, higher_description_model),
+         low_desc_words = str_detect(description, lower_description_model),
+         high_accom_words = str_detect(accomodation, higher_accomodation_model),
+         low_accom_words = str_detect(accomodation, lower_accomodation_model),
+         high_help_words = str_detect(help, higher_help_model),
+         low_help_words = str_detect(help, lower_help_model),
+         high_other_words = str_detect(what_else_cultural_exchange, higher_other_model),
+         low_other_words = str_detect(what_else_cultural_exchange, lower_other_model)        
+         ) %>% 
+  mutate(across(high_desc_words:high_other_words, ~replace_na(.x, FALSE)),
+         across(where(is.character), as.factor),
+         across(where(is.logical), as.factor)
+         ) %>% 
+  select(-c(description, accomodation, help, what_else_cultural_exchange, full))
+
+# workaway_joined <- workaway_joined %>%
+#   select(-c(low_desc_words, high_desc_words, high_other_words, low_other_words, low_help_words, high_help_words, high_accom_words, internet, pets, smokers, hosting_families)) #2nd iteration
+
+# workaway_joined <- workaway_joined %>% #1st iteration
+#   select(-c(pets, smokers, hosting_families)) #1rd iteration
+# 
+# workaway_joined <- workaway_joined %>% #2nd iteration
+#   select(-c(low_desc_words, low_accom_words, low_help_words, internet, high_help_words, low_other_words, high_other_words, high_desc_words, full_huliu, full_jockers_rinker, full_nrc, full_sentiword)) #2nd iteration
+
+#saveRDS(workaway_joined, "workaway_joined_classification.rds")
+```
+```{r HERE Split+Workflow map+Computation - TOKENS - CLASSIFICATION}
+# workaway_joined_cl <- readRDS("workaway_joined_classification.rds")
+# workaway <- readRDS("workaway_download_01_10_new_rating.rds")
+
+set.seed(2222)
+spl <- workaway_joined %>%
+  # left_join(workaway %>% select(title, h_no_show:ww_avg)) %>% 
+  select(-c(average_reply_time, ww_no_show, dec_date, h_avg, h_count, country_host)) %>% 
+  filter(!is.na(ww_avg)) %>%
+  mutate(reply_rate = replace_na(reply_rate, 0),
+         #h_count = replace_na(h_count, 0),
+         ww_count = replace_na(ww_count, 0)) %>%
+  mutate(ww_avg = case_when(
+    ww_avg >= 5 ~ "High",
+    TRUE ~ "Low"
+  ),
+  ww_avg = as.factor(ww_avg)
+  ) %>%
+  # mutate(feedback_total = case_when(
+  #   feedback_total > 13.5 ~ "High",
+  #   TRUE ~ "Low"
+  # )) %>% 
+  initial_split(prop = .8, strata = ww_avg) 
+train <- training(spl)
+test <- testing(spl)
+mset <- metric_set(f_meas, spec, roc_auc, sens, precision, mn_log_loss, accuracy)
+set.seed(562)
+train_fold <- train %>%
+  vfold_cv(2, strata = ww_avg) 
+
+basic_rec <- recipe(ww_avg ~ ., data = train) %>%
+  update_role(title, new_role = "id") #%>% 
+  # step_other(country_host, threshold = 0.01)
+  #step_rm(country_host)
+
+#1st workflow set - Linear GLMNET
+lin_rec <- basic_rec %>%
+  #step_novel(all_nominal_predictors()) %>%
+  #step_unknown(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  step_downsample(ww_avg) %>% 
+  step_zv(all_predictors()) #%>%
+  # prep() %>%
+  # bake(new_data = NULL) %>%
+  # View()
+
+# lin_interact_rec <- basic_rec %>%
+#   step_interact(~all_numeric_predictors():all_numeric_predictors()) %>%
+#   step_zv(all_predictors())
+
+logistic_reg_spec <-
+   logistic_reg(penalty = tune()) %>%
+   set_engine("glmnet")
+# lin_param <-
+#    lin_rec %>%
+#    hardhat::extract_parameter_set_dials() %>%
+#    update(
+#      'df_full_huliu' = deg_free(range = c(2, 4)),
+#      'df_feedback_no' = deg_free(range = c(2, 4)),
+#      'df_reply_rate' = deg_free(range = c(1, 4)),
+#      'df_average_reply_time' = deg_free(range = c(1, 4)))
+basic_wfs <-
+   workflow_set(
+      preproc = list(splines = lin_rec),#, interaction = lin_interact_rec),
+      models = list(linear = logistic_reg_spec),#, linear = linear_reg_spec),
+      cross = FALSE
+   )
+# basic_wfs <-
+#    basic_wfs %>%
+#    option_add(param_info = lin_param, id = "splines_linear")
+
+
+#2nd workflow set - No preprocessing - trees
+no_preproc_rec <- basic_rec
+
+cart_spec <-
+   decision_tree(cost_complexity = tune(), min_n = tune()) %>%
+   set_engine("rpart") %>%
+   set_mode("classification")
+bag_cart_spec <-
+   bag_tree() %>%
+   set_engine("rpart", times = 50L) %>%
+   set_mode("classification")
+# cubist_spec <- #only regression
+#    cubist_rules(committees = tune(), neighbors = tune()) %>%
+#    set_engine("Cubist")
+
+no_preproc_wfs <- workflow_set(
+  preproc = list(no_preproc = no_preproc_rec),
+  models = list(cart = cart_spec,
+                bag = bag_cart_spec),
+                #cubist = cubist_spec), #regression
+  cross = TRUE
+)
+
+#3rd workflow set - FULL PREPROCESSING
+full_preproc_rec <- basic_rec %>%
+  step_impute_mean(all_numeric_predictors()) %>%
+  #step_novel(all_nominal_predictors()) %>%
+  #step_unknown(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  step_downsample(ww_avg) %>% 
+  step_YeoJohnson(host_rating,reply_rate, favourited, number_of_photos, ww_count:trust.emotion.full) %>%
+  step_normalize(host_rating,reply_rate, favourited, number_of_photos, ww_count:trust.emotion.full) %>%
+  step_pca(host_rating,reply_rate, favourited, number_of_photos, ww_count:trust.emotion.full, threshold=0.9) %>%
+  step_zv(all_predictors()) #%>%
+  # prep() %>%
+  # bake(new_data = NULL) %>%
+  # View()
+
+knn_spec <-
+   nearest_neighbor(neighbors = tune(), dist_power = tune(), weight_func = tune()) %>%
+   set_engine("kknn") %>%
+   set_mode("classification")
+nnet_spec <-
+   mlp(hidden_units = tune(), penalty = tune(), epochs = tune()) %>%
+   set_engine("nnet", MaxNWts = 2600) %>%
+   set_mode("classification")
+nnet_param <-
+   nnet_spec %>%
+   hardhat::extract_parameter_set_dials() %>%
+   update(hidden_units = hidden_units(c(2, 32)))
+svm_r_spec <-
+   svm_rbf(cost = tune(), rbf_sigma = tune()) %>%
+   set_engine("kernlab") %>%
+   set_mode("classification")
+svm_p_spec <-
+   svm_poly(cost = tune(), degree = tune()) %>%
+   set_engine("kernlab") %>%
+   set_mode("classification")
+
+full_preprocess_wfs <- workflow_set(
+  preproc = list(full_preproc = full_preproc_rec),
+  models = list(
+    #knn = knn_spec,
+                 mlp = nnet_spec ,
+                 svm_r =  svm_r_spec),
+                 #svm_p = svm_p_spec),
+  cross = TRUE
+)
+
+full_preprocess_wfs <-
+  full_preprocess_wfs %>%
+  option_add(param_info = nnet_param, id ="full_preproc_mlp")
+
+# #4th workflow_set - 
+zv_impute_rec <- basic_rec %>%
+  step_impute_mean(all_numeric_predictors()) %>%
+  step_novel(all_nominal_predictors()) %>%
+  #step_unknown(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  step_downsample(ww_avg) %>% 
+  step_zv(all_predictors()) #%>%
+#   # prep() %>%
+#   # bake(new_data = NULL) %>%
+#   # glimpse()
+# 
+# xgb_spec <- # WARNING - requires dummy transformation!
+#    boost_tree(tree_depth = tune(), learn_rate = tune(), min_n = tune(), trees = tune()) %>% 
+#    set_engine("xgboost") %>% 
+#    set_mode("classification")
+# bayes_spec <- #classification only
+#   naive_Bayes() %>%
+#   set_engine('klaR')
+mars_spec <- # WARNING - requires dummy transformation!
+   parsnip::mars(prod_degree = tune(), num_terms = tune()) %>%  #<- use GCV to choose terms
+   set_engine("earth") %>% 
+   set_mode("classification")
+
+zv_impute_wfs <- workflow_set(
+  preproc = list(zv_impute = zv_impute_rec),
+  models = list(
+    #xgb = xgb_spec,
+     #          bayes = bayes_spec,
+                mars = mars_spec),
+  cross = TRUE
+)
+
+#5th workflow_set - Random Forest
+rf_rec <- basic_rec %>%
+  step_impute_mean(all_numeric_predictors()) %>%
+  step_downsample(ww_avg) %>% 
+  step_zv(all_predictors())
+
+rf_spec <-
+   rand_forest(mtry = tune(), min_n = tune(), trees = 1000) %>%
+   set_engine("ranger") %>%
+   set_mode("classification")
+rf_param <-
+   rf_spec %>%
+   hardhat::extract_parameter_set_dials() %>%
+   update(mtry = finalize(mtry(),train),
+          #mtry = mtry(range = c(2,36)),
+          #trees = trees(range = c(1000, 2000)),
+          min_n = min_n(range = c(2, 40)))
+
+rf_wfs <- workflow_set(
+  preproc = list(random_forest = rf_rec),
+  models = list(rf = rf_spec),
+  cross = TRUE
+)
+
+rf_wfs <-
+  rf_wfs %>%
+  option_add(param_info = rf_param, id ="random_forest_rf")
+
+
+#6th workflow_set - ONLY CLASSIFICATION PROBLEMS
+zv_impute_decor_rec <- basic_rec %>%
+  step_impute_mean(all_numeric_predictors()) %>%
+  #step_novel(all_nominal_predictors()) %>%
+  #step_unknown(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  step_normalize(host_rating,reply_rate, favourited, number_of_photos, ww_count:trust.emotion.full) %>%
+  embed::step_umap(host_rating,reply_rate, favourited, number_of_photos, ww_count:trust.emotion.full, outcome = "ww_avg", num_comp = 8) %>%
+  step_zv(all_predictors()) #%>%
+  # prep() %>%
+  # bake(new_data = NULL) %>%
+  # View()
+
+fda_spec <- #classification only
+  discrim_flexible(
+    prod_degree = tune(),
+  ) %>%
+  set_engine('earth')
+rda_spec <- #classification only
+  discrim_regularized(frac_common_cov = tune(), frac_identity = tune()) %>%
+  set_engine('klaR')
+
+zv_impute_decor_wfs <- workflow_set(
+  preproc = list(zv_impute_decor = zv_impute_decor_rec),
+  models = list(fda = fda_spec,
+                rda = rda_spec),
+  cross = TRUE
+)
+
+all_workflows <- 
+   bind_rows(
+     basic_wfs,
+     rf_wfs,
+     no_preproc_wfs,
+     full_preprocess_wfs,
+     zv_impute_wfs,
+     zv_impute_decor_wfs)
+   # Make the workflow ID's a little more simple: 
+   # mutate(wflow_id = gsub("(simple_)|(normalized_)", "", wflow_id))
+all_workflows
+
+grid_ctrl <-
+   control_grid(
+      save_pred = TRUE,
+      parallel_over = "resamples",
+      save_workflow = TRUE
+   )
+
+full_results_time <-
+   system.time(
+      grid_results_classification_iter04_10_3 <- 
+         all_workflows %>% 
+         workflow_map(seed = 9009, resamples = train_fold, grid = 4, 
+                      control = grid_ctrl, metrics = mset, verbose = TRUE)
+   )/60
+
+saveRDS(grid_results_classification_iter04_10_3 , "grid_results_classification_iter04_10_3.rds")
+```
+```{r Split+Workflow map+Computation - TOKENS - CLASSIFICATION DECISION TREES}
+#workaway_joined <- readRDS("workaway_joined_classification.rds")
+
+grid_ctrl <-
+   control_grid(
+      save_pred = TRUE,
+      parallel_over = NULL, #"resamples",
+      save_workflow = TRUE
+   )
+
+set.seed(2222)
+spl <- workaway_joined %>%
+  filter(!is.na(host_rating)) %>% 
+  select(-c(full_huliu, full_sentiword, full_jockers_rinker, internet, number_of_photos_ltd, average_reply_time, hours_expected_cutted)) %>% 
+  select(-c(high_desc_words, low_desc_words, high_help_words, low_help_words, high_other_words, low_other_words)) %>% 
+  #glimpse()
+  mutate(reply_rate = replace_na(reply_rate, 0)) %>% 
+  mutate(feedback_total = case_when(
+    feedback_total > 13.5 ~ "High",
+    TRUE ~ "Low"
+  )) %>% 
+  mutate(feedback_total = as.factor(feedback_total)) %>% 
+  initial_split(prop = .9, strata = feedback_total) 
+train <- training(spl)
+test <- testing(spl)
+set.seed(562)
+train_fold <- train %>%
+  vfold_cv(5, strata = feedback_total) #previously 10
+
+basic_rec <- recipe(feedback_total ~ ., data = train) %>%
+  update_role(title, new_role = "id") %>% 
+  step_other(country_host, threshold = tune()) %>% 
+  step_dummy(all_nominal(), -feedback_total) %>%
+  themis::step_smote(feedback_total, seed=1000, over_ratio = 1)
+  #step_rm(country_host)
+
+
+#2nd workflow set - No preprocessing - trees
+no_preproc_rec <- basic_rec
+
+cart_spec <- 
+   decision_tree(cost_complexity = tune(), min_n = tune()) %>% 
+   set_engine("rpart") %>% 
+   set_mode("classification")
+# bag_cart_spec <- 
+#    bag_tree() %>% 
+#    set_engine("rpart", times = 50L) %>% 
+#    set_mode("classification")
+# cubist_spec <- #only regression??????
+#    cubist_rules(committees = tune(), neighbors = tune()) %>% 
+#    set_engine("Cubist") 
+
+# no_preproc_wfs <- workflow_set(
+#   preproc = list(no_preproc = no_preproc_rec),
+#   models = list(cart = cart_spec, 
+#                 bag = bag_cart_spec), 
+#                 #cubist = cubist_spec), #regression
+#   cross = TRUE
+# )
+
+dec_tree_wfl <- workflow() %>% 
+  add_recipe(no_preproc_rec) %>%
+  add_model(cart_spec)
+
+dec_param <- dec_tree_wfl %>%
+  hardhat::extract_parameter_set_dials() %>% 
+  update(
+    min_n = min_n(c(2,15)),
+    cost_complexity = cost_complexity(c(-10,-5)),
+    threshold = threshold(c(0.003,0.01))
+  )
+
+
+full_results_time <-
+   system.time(
+     grid_results_classification_tree_iter01_10_0 <- 
+        dec_tree_wfl %>% 
+        tune_grid(resamples = train_fold,
+                  grid = 5, #dec_param %>% grid_regular(levels = 8),
+                  metrics = mset,
+                  param_info = dec_param,
+                  control = grid_ctrl)
+     )/60
+
+```
+```{r Classification results}
+View(grid_results_classification_iter04_10_1 %>% 
+   rank_results())
+   #filter(.metric == "rsq") #%>% 
+   #select(wflow_id, model, .config, rmse = mean, rank)
+
+autoplot(
+   grid_results_classification_iter04_10_0,
+   rank_metric = "roc_auc",  # <- how to order models
+   metric = "roc_auc",       # <- which metric to visualize
+   #id = "i.e. linear_wflow_id",
+   select_best = TRUE     # <- one point per workflow
+)
+
+
+yardstick::conf_mat(
+  grid_results_classification_iter04_10_0[9,] %>% 
+    collect_predictions() %>% 
+    filter(.config == "Preprocessor1_Model1") %>% 
+    mutate(as.factor(ww_avg)),
+  ww_avg,
+  .pred_class)
+
+View(grid_results_classification_iter04_10_0[9,] %>% 
+         collect_predictions()%>% 
+         filter(.config == "Preprocessor1_Model1"))
+```
+
+<p>Let's build another model, one which would predict the <i>ww_avg</i> - Star rating. 
+As we saw earlier the <i>feedback total</i> score is extremely imbalanced, so the problem concerns <i>ww_avg</i> as well, which is just a subgroup of the former. 
+So there are mostly "5-es" in the dataset - we make a cut-off point at exactly 5.0 and treat values equal 5 as <b>positives</b> and <b>negative</b> otherwise. This way we can pick "the best of the best" hosts from the Workaway portal using classification methods.</p> 
+<p>We use again the full variable set in the beginning. Additionally new variables are created: </p>
+1) total number of sentences in summarized text fields (description + accommodation + help + cultural exchange + what else)
+2) emotion scores like joy/fear/trust/disgust etc. calculated on text
+
+<p>Similarly we tune a bunch of models with space-filling design:</p>
+```{r Read star rating results, eval=TRUE, include=TRUE, cache=TRUE}
+grid_results_ww_avg <- readRDS("grid_results_classification_iter04_10_0.rds")
+autoplot(
+   grid_results_ww_avg,
+   rank_metric = "roc_auc",  
+   metric = "roc_auc",       
+   select_best = TRUE     #one point per workflow
+)
+```
+
+
+<h3>'Star' Rating Evaluation</h3>
+<p>This time MARS model was chosen for final assessment as a best one.</p>
+
+<p></p>
+<p>Confusion matrix:</p>
+```{r Confusion matrix iter1, fig.height=3, fig.width=3, eval=TRUE, include=TRUE}
+grid_results_class <- readRDS("grid_results_classification_iter04_10_1.rds")
+yardstick::conf_mat(
+  grid_results_class %>% 
+    collect_predictions() %>% 
+    filter(.config == "Preprocessor1_Model2") %>% 
+    mutate(as.factor(ww_avg)),
+  ww_avg,
+  .pred_class) %>% 
+  autoplot(type = "heatmap")
+```
+
+<p>   </p>
+<p>Variable importance scores:</p>
+```{r VIP mars, fig.height=4, eval=TRUE, include=TRUE, cache=TRUE}
+vip_mars <- readRDS("vip_mars.rds")
+ggplot_imp(vip_mars)
+```
+
+<p>We see that most of the variability in the model is explained by number of comments. In addition type I error is really large, and this is exactly the error we want to minimize (create a model which would safely indicate the 5-star rating host). Because of imbalanced data we would build a model again using downsampling this time.</p>
+
+<p>Confusion matrix on model <b>with downsampling</b>:</p>
+```{r Confusion matrix iter2, fig.height=3, fig.width=3, eval=TRUE, include=TRUE}
+grid_results_mars_best <- readRDS("grid_results_classification_iter04_10_2.rds")
+yardstick::conf_mat(
+  grid_results_mars_best %>% 
+    collect_predictions() %>% 
+    filter(.config == "Preprocessor1_Model1") %>% 
+    mutate(as.factor(ww_avg)),
+  ww_avg,
+  .pred_class) %>% 
+  autoplot(type = "heatmap")
+```
+
+<p>Resample statistics of the model:</p>
+```{r MARS Resamples results, eval=TRUE, include=TRUE, cache=TRUE}
+grid_results_mars_best %>% 
+  collect_metrics() %>%   
+  filter(.config == "Preprocessor1_Model1",
+         .metric != c("mn_log_loss"),
+         .metric != c("spec"),
+         .metric != c("f_meas")
+         ) %>% 
+  select(-preproc, -n, -wflow_id, -.estimator) 
+```
+<p>  </p>
+<p>Last fit on test set:</p>
+```{r MARS Last results, eval=TRUE, include=TRUE, cache=TRUE}
+# best_MARS <- grid_results_mars_best %>%
+#   extract_workflow_set_result("zv_impute_mars") %>%
+#   select_best(metric = "spec")
+# final_MARS <- grid_results_mars_best %>%
+#   extract_workflow_set_result("zv_impute_mars") %>%
+#   extract_workflow() %>%
+#   finalize_workflow(best_MARS)
+# last_MARS <- last_fit(final_MARS, spl)
+# saveRDS(last_MARS, "last_MARS.rds")
+last_MARS <- readRDS("last_MARS.rds")
+last_MARS %>% collect_metrics()
+```
+<p></p>
+
+```{r VIP - MARS}
+library(DALEXtra)
+#library(vip)
+
+mars_res <- grid_results_classification_iter04_10_2 %>% 
+  extract_workflow_set_result("zv_impute_mars")
+
+### TIDY + LAST FIT ###
+# mars_res %>% 
+#   collect_metrics() %>% 
+#   filter(.metric == "rmse") %>% 
+#   arrange(mean)
+
+best_mars <- mars_res %>% 
+  extract_workflow() %>% 
+  finalize_workflow(select_best(mars_res))
+
+train_fit_mars <- fit(best_mars, train)
+# tidy(train_fit_lin) %>%
+#   arrange(-abs(estimate))
+
+# last_lin <- last_fit(best_lin, spl)
+# last_lin %>% collect_metrics()
+# predict_test_lin <- train_fit_lin %>% 
+#   augment(test)
+# predict_test_lin %>% 
+#   select(title, feedback_no, last_activity, reply_rate, average_reply_time, host_rating, .pred) %>% 
+#   View()
+
+
+### DALEX ###
+vip_train <- train %>%
+  select(-ww_avg)
+
+feature_data_mars <- train_fit_mars %>%
+  extract_mold() %>%
+  pluck("predictors")
+
+outcome_data_mars <- train_fit_mars %>% 
+  extract_mold() %>% 
+  pluck("outcomes") %>% 
+  #unlist() %>%
+  #glimpse()
+  mutate(ww_avg = case_when(
+    ww_avg == "High" ~ 1,
+    TRUE ~ 0)) %>%
+  pluck(1) %>%
+  as.vector() %>%
+  as.integer()
+
+set.seed(1991)
+explainer_mars <- explain_tidymodels(train_fit_mars, 
+    data = feature_data_mars, 
+    y = outcome_data_mars,
+    label = "mars_best",
+    type = "classification",
+    verbose = TRUE
+  ) 
+
+tictoc::tic()
+vip_mars <- model_parts(explainer_mars,
+                      N = 2000)
+tictoc::toc()
+beepr::beep(2)
+ggplot_imp(vip_mars)
+```
+```{r VIP - Decision trees}
+library(DALEXtra)
+#library(vip)
+
+DEC_res <- grid_results_classification_iter02_10_0 %>% 
+  extract_workflow_set_result("no_preproc_cart")
+
+### TIDY + LAST FIT ###
+# DEC_res %>% 
+#   collect_metrics() %>% 
+#   filter(.metric == "rmse") %>% 
+#   arrange(mean)
+
+best_DEC <- DEC_res %>% 
+  extract_workflow() %>% 
+  finalize_workflow(select_best(DEC_res))
+
+train_fit_DEC <- fit(best_DEC, train)
+# tidy(train_fit_lin) %>%
+#   arrange(-abs(estimate))
+
+# last_lin <- last_fit(best_lin, spl)
+# last_lin %>% collect_metrics()
+# predict_test_lin <- train_fit_lin %>% 
+#   augment(test)
+# predict_test_lin %>% 
+#   select(title, feedback_no, last_activity, reply_rate, average_reply_time, host_rating, .pred) %>% 
+#   View()
+
+
+### DALEX ###
+vip_train <- train %>%
+  select(-ww_avg)
+
+feature_data_DEC <- train_fit_DEC %>%
+  extract_mold() %>%
+  pluck("predictors")
+
+outcome_data_DEC <- train_fit_DEC %>% 
+  extract_mold() %>% 
+  pluck("outcomes") %>% 
+  #unlist() %>%
+  #glimpse()
+  mutate(ww_avg = case_when(
+    ww_avg == "High" ~ 1,
+    TRUE ~ 0)) %>%
+  pluck(1) %>%
+  as.vector() %>%
+  as.integer()
+
+set.seed(1991)
+explainer_DEC <- explain_tidymodels(train_fit_DEC, 
+    data = vip_train, 
+    y = outcome_data_DEC,
+    label = "DEC_best",
+    type = "classification",
+    verbose = TRUE
+  ) 
+
+tictoc::tic()
+vip_DEC <- model_parts(explainer_DEC,
+                      N = 3000)
+tictoc::toc()
+beepr::beep(2)
+#saveRDS(vip_DEC, "vip_DEC_workflow_map_iter1_8grid.rds")
+ggplot_imp(vip_DEC)
+# ggsave("lin_initial_v4_DALEXtra_importance.png", width = 15, height = 8)
+
+### SHAP for bottom 5
+# lowest_feedback_8_5 <- train %>% 
+#   filter(title == 'Animals and conviviality with our non-profit in Lançon-de-Provence, France')
+# 
+
+# set.seed(1802)
+# shap_minimum_pred_linear <- 
+#   predict_parts(
+#     explainer = explainer_DEC, 
+#     new_observation = minimum_pred_linear, 
+#     type = "shap",
+#     B = 20)
+
+```
+```{r VIP - XGB - regression host rating}
+library(DALEXtra)
+### DALEX ###
+vip_train <- train %>% 
+  select(-c(host_rating))
+
+# feature_data_XGB <- train_fit_XGB %>%
+#   extract_mold() %>%
+#   pluck("predictors")
+
+outcome_data_XGB <- train_fit_XGB %>% 
+  extract_mold() %>% 
+  pluck("outcomes") #%>% 
+  #glimpse() 
+  #unlist() %>%
+  # mutate(rain_tomorrow = case_when(
+  #   rain_tomorrow == "raining" ~ 1,
+  #   rain_tomorrow == "no rain" ~ 0)) %>% 
+  # pluck(1) %>% 
+  # as.vector() %>% 
+  # as.integer()
+
+set.seed(1991)
+explainer_XGB <- explain_tidymodels(train_fit_XGB, 
+    data = vip_train, 
+    y = outcome_data_XGB,
+    label = "XGB_best_rsq",
+    type = "regression",
+    verbose = TRUE
+  ) 
+
+tictoc::tic()
+vip_XGB <- model_parts(explainer_XGB,
+                      N = 4000)
+tictoc::toc()
+beepr::beep(2)
+
+#ggplot_imp(vip_XGB)
+#saveRDS(vip_XGB, "grid_results_host_rating_comm3.rds")
+
+### SHAP for bottom 5
+# lowest_feedback_8_5 <- train %>% 
+#   filter(title == 'Animals and conviviality with our non-profit in Lançon-de-Provence, France')
+# 
+# lowest_feedback_9_2 <- train %>% 
+#   filter(title == 'Help with our lakeside eco-lodge in Santa Clara a Velha, southern Portugal')
+# 
+# best_feedback_15_1 <- train %>% 
+#   filter(title == 'Help at our brand spanking new hostel in Zagreb, Croatia')
+# 
+# minimum_pred_linear <- train %>% 
+#   filter(title == 'Join us and our non-profit association, on a farm in Järbo, Sweden')
+#  
+# set.seed(1802)
+# shap_minimum_pred_linear <- 
+#   predict_parts(
+#     explainer = explainer_XGB, 
+#     new_observation = minimum_pred_linear, 
+#     type = "shap",
+#     B = 20
+#     )
+# 
+# shap_id_8_5 <- 
+#   predict_parts(
+#     explainer = explainer_lin, 
+#     new_observation = lowest_feedback_8_5, 
+#     type = "shap",
+#     B = 20
+#     )
+# 
+# shap_id_9_2 <- 
+#   predict_parts(
+#     explainer = explainer_lin, 
+#     new_observation = lowest_feedback_9_2, 
+#     type = "shap",
+#     B = 20
+#     )
+# 
+# shap_id_15_1 <- 
+#   predict_parts(
+#     explainer = explainer_lin, 
+#     new_observation = best_feedback_15_1, 
+#     type = "shap",
+#     B = 20
+#     )
+# 
+# shap_minimum_pred_linear %>%
+#   group_by(variable) %>%
+#   mutate(mean_val = mean(contribution)) %>%
+#   ungroup() %>%
+#   mutate(variable = fct_reorder(variable, abs(mean_val))) %>%
+#   ggplot(aes(contribution, variable, fill = mean_val > 0)) +
+#   geom_col(data = ~distinct(., variable, mean_val), 
+#            aes(mean_val, variable), 
+#            alpha = 0.5) +
+#   geom_boxplot(width = 0.5) +
+#   theme(legend.position = "none") +
+#   scale_fill_viridis_d() +
+#   labs(y = NULL,
+#        title = "Linear model minimum prediction (~14.05) SHAP analysis")
+# 
+# shap_id_8_5 %>%
+#   group_by(variable) %>%
+#   mutate(mean_val = mean(contribution)) %>%
+#   ungroup() %>%
+#   mutate(variable = fct_reorder(variable, abs(mean_val))) %>%
+#   ggplot(aes(contribution, variable, fill = mean_val > 0)) +
+#   geom_col(data = ~distinct(., variable, mean_val), 
+#            aes(mean_val, variable), 
+#            alpha = 0.5) +
+#   geom_boxplot(width = 0.5) +
+#   theme(legend.position = "none") +
+#   scale_fill_viridis_d() +
+#   labs(y = NULL,
+#        title = "Linear shap_id_8_5")
+# 
+# shap_id_9_2 %>%
+#   group_by(variable) %>%
+#   mutate(mean_val = mean(contribution)) %>%
+#   ungroup() %>%
+#   mutate(variable = fct_reorder(variable, abs(mean_val))) %>%
+#   ggplot(aes(contribution, variable, fill = mean_val > 0)) +
+#   geom_col(data = ~distinct(., variable, mean_val), 
+#            aes(mean_val, variable), 
+#            alpha = 0.5) +
+#   geom_boxplot(width = 0.5) +
+#   theme(legend.position = "none") +
+#   scale_fill_viridis_d() +
+#   labs(y = NULL,
+#        title = "Linear shap_id_9_2")
+# 
+# shap_id_15_1 %>%
+#   group_by(variable) %>%
+#   mutate(mean_val = mean(contribution)) %>%
+#   ungroup() %>%
+#   mutate(variable = fct_reorder(variable, abs(mean_val))) %>%
+#   ggplot(aes(contribution, variable, fill = mean_val > 0)) +
+#   geom_col(data = ~distinct(., variable, mean_val), 
+#            aes(mean_val, variable), 
+#            alpha = 0.5) +
+#   geom_boxplot(width = 0.5) +
+#   theme(legend.position = "none") +
+#   scale_fill_viridis_d() +
+#   labs(y = NULL,
+#        title = "Linear shap_id_15_1")
+```
+```{r VIP - Cubist - regression host rating}
+library(DALEXtra)
+
+Cubist_res <- grid_results_host_rating_iter0 %>% 
+  extract_workflow_set_result("no_preproc_cubist")
+
+### TIDY + LAST FIT ###
+Cubist_res %>% 
+  collect_metrics() %>% 
+  filter(.metric == "rmse") %>% 
+  arrange(mean)
+
+best_Cubist <- Cubist_res %>% 
+  extract_workflow() %>% 
+  finalize_workflow(select_best(Cubist_res))
+
+train_fit_Cubist <- fit(best_Cubist, train)
+# tidy(train_fit_lin) %>%
+#   arrange(-abs(estimate))
+
+# last_lin <- last_fit(best_lin, spl)
+# last_lin %>% collect_metrics()
+# predict_test_lin <- train_fit_lin %>% 
+#   augment(test)
+# predict_test_lin %>% 
+#   select(title, feedback_no, last_activity, reply_rate, average_reply_time, host_rating, .pred) %>% 
+#   View()
+
+
+### DALEX ###
+vip_train <- train %>% 
+  select(-c(host_rating))
+
+feature_data_Cubist <- train_fit_Cubist %>%
+  extract_mold() %>%
+  pluck("predictors")
+
+outcome_data_Cubist <- train_fit_Cubist %>% 
+  extract_mold() %>% 
+  pluck("outcomes") #%>% 
+  #glimpse() 
+  #unlist() %>%
+  # mutate(rain_tomorrow = case_when(
+  #   rain_tomorrow == "raining" ~ 1,
+  #   rain_tomorrow == "no rain" ~ 0)) %>% 
+  # pluck(1) %>% 
+  # as.vector() %>% 
+  # as.integer()
+
+set.seed(1991)
+explainer_Cubist <- explain_tidymodels(train_fit_Cubist, 
+    data = vip_train, 
+    y = outcome_data_Cubist,
+    label = "Cubist_best_rsq",
+    type = "regression",
+    verbose = TRUE
+  ) 
+
+tictoc::tic()
+vip_Cubist <- model_parts(explainer_Cubist,
+                      N = 9000)
+tictoc::toc()
+beepr::beep(2)
+
+ggplot_imp(vip_Cubist)
+# ggsave("lin_initial_v4_DALEXtra_importance.png", width = 15, height = 8)
+saveRDS(vip_Cubist, "vip_Cubist_host_rating_iter0.rds")
+```
+
+
+<h2>Conclusions</h2>
+1) Well-performing <i>Host rating</i> model was developed in regards to baseline standard deviation model.
+
+2) The Host rating proposed by management of Workaway portal is a metric based on only 6 predictors. However looking at R-squared value, we see that it's around 90%. It means there might be also another information/predictor which is not present directly on the host profile.
+
+3) Non-normal distribution of <i>Feedback Total</i> ratings, with 90% over 14.0 is present due to the fact that workaway is often 1-time experience (you also pay for 1 year upfront). Workawayer competes with different people for 'available space' at host's place. It's easier to win this competition when you have positive reviews, and that makes a workawayer leave very high feedback often. On the other hand, if a workawayer had a bad experience with host, it is more easy not to leave any feedback at all, and hope not to get a negative comment as well. 
+
+4) Several dozens of significant words were identified related to <i>Feedback Total</i> by use of multiple GLM models, however they did not allow creating variables which would generalize well on the whole dataset.
+
+5) Unfortunately for a potential traveler/workawayer, both of the nicely presented metrics <i>host rating & feedback total</i> are <b>completely useless</b>. The first is based mainly on <i>reply rate</i> which is uninformative regarding true quality of a host. The second one is new, with 60% of total missing, and furthermore its values are mostly maximum.
+<p></p>
+<p>Proposed prediction model, allows choosing a 5-star-rating-host with reduced probability of committing type I error, one can use it to screen batch of records from whole country, instead of scrolling through portal summarizing the user-ratings manually.</p>
+<p>However it's still far from perfect: </p>
+- predicting power of model is based on user comments number, so new hosts without them wouldn't be predicted correctly
+- variability of text-input areas are low, emotion features are not very important in the chosen model
+
+<p>What else could be done to make the "Star-rating" classification model performance better in terms of Type I error?</p>
+- dates of consecutive comments on host portal could be a potential 'red light' indicator related to conclusion '3)'
+- some of the profiles are solely written in non-English - translating all text into English could improve text analysis
