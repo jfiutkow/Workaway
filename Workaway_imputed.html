@@ -545,21 +545,21 @@ Last fit on test set:
 <h2>
 Conclusions
 </h2>
+<p>
 <ol style="list-style-type: decimal">
 <li><p>Well-performing <i>Host rating</i> model was developed in regards to baseline standard deviation model.</p></li>
 <li><p>The Host rating proposed by management of Workaway portal is a metric based on only 6 predictors. However looking at R-squared value, we see that it’s around 90%. It means there might be also another information/predictor which is not present directly on the host profile.</p></li>
 <li><p>Non-normal distribution of <i>Feedback Total</i> ratings, with 90% over 14.0 is present due to the fact that workaway is often 1-time experience (you also pay for 1 year upfront). Workawayer competes with different people for ‘available space’ at host’s place. It’s easier to win this competition when you have positive reviews, and that makes a workawayer leave very high feedback often. On the other hand, if a workawayer had a bad experience with host, it is more easy not to leave any feedback at all, and hope not to get a negative comment as well.</p></li>
 <li><p>Several dozens of significant words were identified related to <i>Feedback Total</i> by use of multiple GLM models, however they did not allow creating variables which would generalize well on the whole dataset.</p></li>
-<li><p>Unfortunately for a potential traveler/workawayer, both of the nicely presented metrics <i>host rating &amp; feedback total</i> are <b>completely useless</b>. The first is based mainly on <i>reply rate</i> which is uninformative regarding true quality of a host. The second one is new, with 60% of total missing, and furthermore its values are mostly maximum.</p>
-<p>
-</p>
-<p>
-<p>Proposed prediction model, allows choosing a 5-star-rating-host with reduced probability of committing type I error, one can use it to screen batch of records from whole country, instead of scrolling through portal summarizing the user-ratings manually.</p>
-</p>
-<p>
-<p>However it’s still far from perfect:</p>
-</p></li>
+<li><p>Unfortunately for a potential traveler/workawayer, both of the nicely presented metrics <i>host rating &amp; feedback total</i> are <b>completely useless</b>. The first is based mainly on <i>reply rate</i> which is uninformative regarding true quality of a host. The second one is new, with 60% of total missing, and furthermore its values are mostly maximum.</p></li>
 </ol>
+</p>
+<p>
+Proposed prediction model, allows choosing a 5-star-rating-host with reduced probability of committing type I error, one can use it to screen batch of records from whole country, instead of scrolling through portal summarizing the user-ratings manually.
+</p>
+<p>
+However it’s still far from perfect:
+</p>
 <ul>
 <li>predicting power of model is based on user comments number, so new hosts without them wouldn’t be predicted correctly</li>
 <li>variability of text-input areas are low, emotion features are not very important in the chosen model</li>
