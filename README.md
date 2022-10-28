@@ -17,8 +17,10 @@ You can download the HTML to your device and open in web browser or open directl
 
 Repository contains:
 
-- webscraped data `Countries 09-2022.rar` in CSV format
-- Jupyter notebook script `Main_ws.ipynb` in case you would like to webscrap from Workaway portal up-to-date data yourself
+- webscraped data `Countries 09-2022.rar`
+- Jupyter notebook script `Main_ws.ipynb` in case you would like to webscrap from Workaway portal up-to-date data yourself. You can choose from two:
+  - first script batch-looping through all countries
+  - second script only webscarping the single input country
 - R markdown file with all the code to fully recreate presented analysis
 
 ## Usage
